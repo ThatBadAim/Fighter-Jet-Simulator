@@ -1,0 +1,55 @@
+#pragma once
+
+#include "mass_properties.hpp"
+#include "../aircraft/aircraft_type.hpp"
+#include "../aircraft/aircraft_config.hpp"
+#include <algorithm>
+
+namespace fastjet {
+namespace fdm {
+
+/**
+ * @brief Variable-mass model: rebuilds MassProperties as internal fuel is burned.
+ *
+ * Supports all aircraft types, scaling inertia from the aircraft's empty tensor
+ * by the gross-to-empty mass ratio.
+ */
+class FuelSystem {
+public:
+    static constexpr double EMPTY_MASS_KG = 9298.643585; // 20,500 lb
+
+    /**
+     * @brief Builds mass properties for a given fuel load and aircraft type.
+     *
+     * @param fuel_kg Internal fuel remaining [kg].
+     * @param type Aircraft model (defaults to F-16C).
+     * @return MassProperties with gross mass and scaled inertia tensor.
+     */
+    [[nodiscard]] static MassProperties compute(
+        double fuel_kg,
+        aircraft::AircraftType type = aircraft::AircraftType::F16_FIGHTING_FALCON
+    ) noexcept {
+        const auto cfg = aircraft::AircraftConfig::get(type);
+        const double fuel = std::max(0.0, fuel_kg);
+        const double gross_mass = cfg.mass.empty_mass_kg + fuel;
+
+        // Empty-airframe inertia
+        const MassProperties empty = MassProperties::create(type);
+
+        // Scale the tensor by the mass ratio.
+        const double ratio = (cfg.mass.empty_mass_kg > 0.0)
+                           ? (gross_mass / cfg.mass.empty_mass_kg)
+                           : 1.0;
+
+        return MassProperties(
+            gross_mass,
+            empty.Ixx * ratio,
+            empty.Iyy * ratio,
+            empty.Izz * ratio,
+            empty.Ixz * ratio
+        );
+    }
+};
+
+} // namespace fdm
+} // namespace fastjet

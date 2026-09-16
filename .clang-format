@@ -1,0 +1,27 @@
+---
+Language:        Cpp
+BasedOnStyle:    Google
+
+AccessModifierOffset: -4
+AlignAfterOpenBracket: AlignAfterOperator
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: WithoutElse
+AlwaysBreakTemplateDeclarations: Yes
+BinPackArguments: false
+BinPackParameters: false
+BreakBeforeBraces: Attach
+ColumnLimit:     100
+ConstructorInitializerIndentWidth: 4
+ContinuationIndentWidth: 4
+Cpp11BracedListStyle: true
+DerivePointerAlignment: false
+IndentWidth:     4
+NamespaceIndentation: None
+PointerAlignment: Left
+ReflowComments:  true
+SortIncludes:    false
+SpaceAfterCStyleCast: false
+SpacesBeforeTrailingComments: 1
+Standard:        c++20
+TabWidth:        4
+UseTab:          Never

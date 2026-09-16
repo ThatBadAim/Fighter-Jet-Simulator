@@ -1,0 +1,27 @@
+# Build and executable artifacts
+bin/
+build/
+*.o
+*.a
+*.so
+*.dylib
+*.exe
+
+# CMake artifacts
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+Makefile.cmake
+
+# Editor & OS metadata
+.DS_Store
+.directory
+*~
+*.swp
+*.swo
+.vscode/
+.idea/
+
+# Graphify cache
+graphify-out/cache/

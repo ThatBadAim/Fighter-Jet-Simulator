@@ -1,0 +1,255 @@
+#pragma once
+
+#include "../input/avionics_controls.hpp"
+#include "../environment/atmosphere1976.hpp"
+#include "../aircraft/aircraft_type.hpp"
+#include "../aircraft/aircraft_config.hpp"
+#include <algorithm>
+#include <cmath>
+
+namespace fastjet::propulsion {
+
+/**
+ * @brief High-fidelity propulsion model supporting single and twin installations,
+ * dry turbofans (A-10), supersonic afterburning turbofans (F-16, F-15EX, Typhoon, F-22),
+ * altitude/Mach lapse, spool dynamics, nacelle pitch-thrust coupling, and 2D thrust vectoring.
+ *
+ * Zero dynamic heap allocation; safe to execute at 200 Hz in the hot physics loop.
+ */
+class MultiEngine {
+public:
+    aircraft::AircraftType aircraft_type{aircraft::AircraftType::F16_FIGHTING_FALCON};
+    aircraft::PropulsionConfig config{};
+
+    double commanded_thrust_n{0.0};
+    double net_thrust_n{0.0};
+    double fuel_kg{3175.1};
+    double fuel_flow_kgs{0.0};
+
+    // Detent and lever power state
+    input::ThrottleController::DetentState detent_state{input::ThrottleController::DetentState::IDLE};
+    double dry_power{0.0};
+    double ab_power{0.0};
+
+    // Thrust vectoring pitch command [-1.0, +1.0] -> [-max_deg, +max_deg]
+    double tvc_pitch_cmd{0.0};
+    double tvc_pitch_actual_deg{0.0};
+
+    constexpr MultiEngine() noexcept {
+        configure(aircraft::AircraftType::F16_FIGHTING_FALCON);
+    }
+
+    explicit constexpr MultiEngine(aircraft::AircraftType type) noexcept {
+        configure(type);
+    }
+
+    /// @brief Installs a different powerplant.
+    ///
+    /// @param type          Airframe whose propulsion installation to adopt.
+    /// @param preserve_fuel Carry the current fuel *fraction* across the swap
+    ///                      rather than filling the new tanks. A mid-flight
+    ///                      airframe change would otherwise silently refuel the
+    ///                      aircraft, so an in-flight switch passes true and
+    ///                      only a fresh start or reset fills the tanks.
+    constexpr void configure(aircraft::AircraftType type, bool preserve_fuel = false) noexcept {
+        const double prev_capacity =
+            aircraft::AircraftConfig::get(aircraft_type).mass.internal_fuel_capacity_kg;
+        const double prev_fraction =
+            (prev_capacity > 0.0) ? (fuel_kg / prev_capacity) : 1.0;
+
+        aircraft_type = type;
+        const auto a_cfg = aircraft::AircraftConfig::get(type);
+        config = a_cfg.propulsion;
+        const double new_capacity = a_cfg.mass.internal_fuel_capacity_kg;
+        fuel_kg = preserve_fuel
+            ? std::clamp(prev_fraction, 0.0, 1.0) * new_capacity
+            : new_capacity;
+        commanded_thrust_n = 0.0;
+        net_thrust_n = 0.0;
+        fuel_flow_kgs = 0.0;
+        dry_power = 0.0;
+        ab_power = 0.0;
+        tvc_pitch_cmd = 0.0;
+        tvc_pitch_actual_deg = 0.0;
+    }
+
+    /**
+     * @brief Computes installed thrust lapse with density ratio and Mach number.
+     */
+    [[nodiscard]] double lapse_factor(
+        const environment::AirData& air,
+        bool in_ab
+    ) const noexcept {
+        const double sigma = std::clamp(
+            air.density / environment::Atmosphere1976::RHO0, 0.0, 1.5);
+
+        // Density exponent
+        const double exponent = in_ab ? 1.0 : 0.85;
+        const double density_term = std::pow(sigma, exponent);
+
+        // Ram recovery
+        const double mach = std::clamp(air.mach_number, 0.0, 2.6);
+        double k_ram = in_ab ? 0.36 : 0.16;
+
+        // Enhanced ram recovery for supercruising aircraft (Typhoon, F-22)
+        if (config.has_supercruise && !in_ab) {
+            k_ram = 0.28;
+        }
+        // Higher bypass engines (A-10 TF34) suffer greater momentum drag at speed
+        if (!config.has_afterburner) {
+            k_ram = 0.05;
+        }
+
+        const double ram_term = 1.0 + k_ram * mach * mach;
+        return density_term * ram_term;
+    }
+
+    /**
+     * @brief Advances propulsion model by one timestep.
+     *
+     * @param throttle_position Lever in [0.0, 1.0].
+     * @param air Air data at current altitude and speed.
+     * @param dt Timestep in seconds.
+     * @param ab_gate_open Physical afterburner detent gate.
+     * @return Net thrust in Newtons.
+     */
+    double update(
+        double throttle_position,
+        const environment::AirData& air,
+        double dt,
+        bool ab_gate_open = true
+    ) noexcept {
+        const bool has_fuel = (fuel_kg > 0.0);
+        const double u = has_fuel ? std::clamp(throttle_position, 0.0, 1.0) : 0.0;
+
+        double static_rating = 0.0;
+        bool in_ab = false;
+
+        constexpr double DETENT_CUTOFF = 0.03;
+        constexpr double DETENT_IDLE   = 0.08;
+        constexpr double DETENT_MIL    = 0.85;
+
+        if (u < DETENT_CUTOFF) {
+            detent_state = input::ThrottleController::DetentState::CUTOFF;
+            dry_power = 0.0;
+            ab_power = 0.0;
+            static_rating = 0.0;
+        } else if (u <= DETENT_IDLE) {
+            detent_state = input::ThrottleController::DetentState::IDLE;
+            dry_power = 0.0;
+            ab_power = 0.0;
+            static_rating = config.static_idle_thrust_n;
+        } else if (!config.has_afterburner) {
+            // Dry-only aircraft (e.g. A-10C): throttle maps [0.08, 1.00] linearly to max dry
+            detent_state = input::ThrottleController::DetentState::MIL_POWER;
+            const double span = 1.0 - DETENT_IDLE;
+            dry_power = std::clamp((u - DETENT_IDLE) / span, 0.0, 1.0);
+            ab_power = 0.0;
+            static_rating = config.static_idle_thrust_n +
+                            dry_power * (config.static_dry_thrust_n - config.static_idle_thrust_n);
+        } else if (u <= DETENT_MIL || !ab_gate_open) {
+            // Dry range on afterburning jet
+            detent_state = input::ThrottleController::DetentState::MIL_POWER;
+            const double mil_range = DETENT_MIL - DETENT_IDLE;
+            dry_power = std::clamp((u - DETENT_IDLE) / mil_range, 0.0, 1.0);
+            ab_power = 0.0;
+            static_rating = config.static_idle_thrust_n +
+                            dry_power * (config.static_dry_thrust_n - config.static_idle_thrust_n);
+        } else {
+            // Wet / Afterburner range (0.85 to 1.00)
+            detent_state = input::ThrottleController::DetentState::AFTERBURNER;
+            dry_power = 1.0;
+            const double ab_range = 1.00 - DETENT_MIL;
+            ab_power = std::clamp((u - DETENT_MIL) / ab_range, 0.0, 1.0);
+            in_ab = true;
+            static_rating = config.static_dry_thrust_n +
+                            ab_power * (config.static_ab_thrust_n - config.static_dry_thrust_n);
+        }
+
+        // Apply installed atmospheric lapse
+        commanded_thrust_n = static_rating * lapse_factor(air, in_ab);
+
+        // Spool dynamics
+        if (dt > 0.0) {
+            double tau = config.tau_spool_up;
+            if (in_ab) {
+                tau = config.tau_ab_light;
+            } else if (commanded_thrust_n < net_thrust_n) {
+                tau = config.tau_spool_down;
+            }
+
+            const double alpha = 1.0 - std::exp(-dt / (std::max)(0.05, tau));
+            net_thrust_n += (commanded_thrust_n - net_thrust_n) * alpha;
+
+            // TVC nozzle actuator rate limit (60 deg/s)
+            if (config.has_thrust_vectoring) {
+                const double target_deg = std::clamp(tvc_pitch_cmd, -1.0, 1.0) * config.tvc_max_deflection_deg;
+                const double max_rate = 60.0 * dt;
+                const double delta = target_deg - tvc_pitch_actual_deg;
+                tvc_pitch_actual_deg += std::clamp(delta, -max_rate, max_rate);
+            }
+        } else {
+            net_thrust_n = commanded_thrust_n;
+        }
+
+        net_thrust_n = (std::max)(0.0, net_thrust_n);
+
+        // Fuel burn calculation
+        const double tsfc = in_ab ? config.tsfc_ab : config.tsfc_dry;
+        fuel_flow_kgs = has_fuel ? (net_thrust_n * tsfc) : 0.0;
+        if (dt > 0.0) {
+            fuel_kg = (std::max)(0.0, fuel_kg - fuel_flow_kgs * dt);
+        }
+
+        return net_thrust_n;
+    }
+
+    /**
+     * @brief Pitching moment generated by engine installation.
+     * Includes A-10 high-mount nacelle pitch coupling and F-22 2D thrust vectoring.
+     */
+    [[nodiscard]] double pitch_moment() const noexcept {
+        double my = 0.0;
+
+        // 1. Vertical thrust offset arm (A-10 high nacelle is at Z = -1.2m above CG)
+        // Forward thrust Fx creates pitching moment: My = -Fx * z_offset
+        if (config.thrust_z_offset_m != 0.0) {
+            my += -net_thrust_n * config.thrust_z_offset_m;
+        }
+
+        // 2. 2D Thrust Vectoring (F-22 nozzle deflection)
+        // Deflection angle delta (positive pitch up = nozzle pointing up = negative Z in body frame)
+        if (config.has_thrust_vectoring && config.tvc_moment_arm_m > 0.0) {
+            constexpr double DEG_TO_RAD = M_PI / 180.0;
+            const double delta_rad = tvc_pitch_actual_deg * DEG_TO_RAD;
+            // Upward thrust component produces pitch-up moment about CG
+            const double fz_tvc = -net_thrust_n * std::sin(delta_rad);
+            my += -fz_tvc * config.tvc_moment_arm_m;
+        }
+
+        return my;
+    }
+
+    [[nodiscard]] double fuel_fraction() const noexcept {
+        const double cap = aircraft::AircraftConfig::get(aircraft_type).mass.internal_fuel_capacity_kg;
+        return (cap > 0.0) ? std::clamp(fuel_kg / cap, 0.0, 1.0) : 0.0;
+    }
+
+    [[nodiscard]] bool is_flamed_out() const noexcept {
+        return fuel_kg <= 0.0;
+    }
+
+    void reset(double fuel_load_kg = -1.0) noexcept {
+        const double cap = aircraft::AircraftConfig::get(aircraft_type).mass.internal_fuel_capacity_kg;
+        fuel_kg = (fuel_load_kg >= 0.0) ? std::clamp(fuel_load_kg, 0.0, cap) : cap;
+        commanded_thrust_n = 0.0;
+        net_thrust_n = 0.0;
+        fuel_flow_kgs = 0.0;
+        dry_power = 0.0;
+        ab_power = 0.0;
+        tvc_pitch_cmd = 0.0;
+        tvc_pitch_actual_deg = 0.0;
+    }
+};
+
+} // namespace fastjet::propulsion

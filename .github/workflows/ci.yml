@@ -1,0 +1,97 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  physics:
+    name: Physics tests (${{ matrix.compiler }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [g++, clang++]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang
+
+      # The physics and FLCS tests are pure computation: no SDL3, no GPU.
+      # Portable flags only - never -march=native in CI.
+      - name: Build and run headless physics tests
+        env:
+          CXX: ${{ matrix.compiler }}
+        run: |
+          set -euo pipefail
+          CORE_TESTS="
+            test_atmosphere test_ballistic test_gyroscopic test_performance
+            test_interpolator test_aero_coefficients test_pitch_divergence
+            test_actuators test_flcs_level_flight test_flcs_pullup
+            test_flcs_review test_signal_conditioning test_force_curves
+            test_avionics_controls test_config_persistence
+            test_propulsion test_landing_gear test_compressibility
+            test_integrated_flight test_throttle_control test_performance_envelope
+            test_terrain_field"
+          mkdir -p bin
+          for t in $CORE_TESTS; do
+            echo "::group::$t"
+            "$CXX" -std=c++20 -O2 -Wall -Wextra -Wpedantic -Iinclude \
+                "tests/$t.cpp" -o "bin/$t"
+            "./bin/$t"
+            echo "::endgroup::"
+          done
+
+  full:
+    name: Full suite with graphics (headless GL)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libepoxy-dev \
+              libgl1-mesa-dev libosmesa6-dev xvfb ninja-build cmake
+          # SDL3 is not yet in the Ubuntu archive; build it from source.
+          git clone --depth 1 --branch release-3.2.8 \
+              https://github.com/libsdl-org/SDL.git /tmp/SDL
+          cmake -S /tmp/SDL -B /tmp/SDL/build -GNinja \
+              -DCMAKE_BUILD_TYPE=Release -DSDL_STATIC=OFF
+          cmake --build /tmp/SDL/build
+          sudo cmake --install /tmp/SDL/build
+          sudo ldconfig
+
+      - name: Build (portable flags)
+        run: make all CXXFLAGS="-std=c++20 -O2 -Wall -Wextra -Wpedantic -Iinclude"
+
+      - name: Run full suite under virtual display
+        run: xvfb-run -a --server-args="-screen 0 1920x1080x24" make run_all
+
+  warnings:
+    name: Zero-warning build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: sudo apt-get update && sudo apt-get install -y build-essential
+
+      # Every physics header must compile clean under -Werror.
+      - name: Compile headers with -Werror
+        run: |
+          set -euo pipefail
+          for t in test_propulsion test_landing_gear test_compressibility \
+                   test_integrated_flight test_throttle_control test_performance_envelope \
+                   test_terrain_field test_ballistic test_aero_coefficients; do
+            g++ -std=c++20 -O2 -Wall -Wextra -Wpedantic -Werror \
+                -Iinclude "tests/$t.cpp" -o /dev/null
+          done
