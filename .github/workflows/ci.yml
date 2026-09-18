@@ -64,7 +64,7 @@ jobs:
           git clone --depth 1 --branch release-3.2.8 \
               https://github.com/libsdl-org/SDL.git /tmp/SDL
           cmake -S /tmp/SDL -B /tmp/SDL/build -GNinja \
-              -DCMAKE_BUILD_TYPE=Release -DSDL_STATIC=OFF
+              -DCMAKE_BUILD_TYPE=Release -DSDL_STATIC=OFF -DSDL_UNIX_CONSOLE=ON
           cmake --build /tmp/SDL/build
           sudo cmake --install /tmp/SDL/build
           sudo ldconfig
