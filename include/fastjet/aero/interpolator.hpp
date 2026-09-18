@@ -19,6 +19,9 @@ public:
      * @brief Finds the bounding index and interpolation fraction t in [0, 1].
      * Clamps to [0, N-2] and [0.0, 1.0].
      *
+     * Optimization: Uses linear scan for small grid sizes (N <= 16), which avoids
+     * branch mispredictions and logarithmic loop overhead in hot aerodynamic table lookup loops.
+     *
      * @tparam N Size of grid array
      * @param grid Strictly monotonically increasing array of breakpoints
      * @param x Query value
@@ -45,15 +48,23 @@ public:
             return;
         }
 
-        // Binary search for upper bound
         std::size_t low = 0;
-        std::size_t high = N - 1;
-        while (high - low > 1) {
-            const std::size_t mid = low + (high - low) / 2;
-            if (grid[mid] <= x) {
-                low = mid;
-            } else {
-                high = mid;
+
+        if constexpr (N <= 16) {
+            // Linear scan for small grid sizes
+            while (low + 1 < N - 1 && grid[low + 1] <= x) {
+                ++low;
+            }
+        } else {
+            // Binary search for larger grid sizes
+            std::size_t high = N - 1;
+            while (high - low > 1) {
+                const std::size_t mid = low + (high - low) / 2;
+                if (grid[mid] <= x) {
+                    low = mid;
+                } else {
+                    high = mid;
+                }
             }
         }
 
