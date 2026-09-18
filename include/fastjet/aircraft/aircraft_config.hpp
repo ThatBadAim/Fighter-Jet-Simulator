@@ -9,7 +9,7 @@ namespace fastjet::aircraft {
  * @brief Verified mass and inertia properties for an aircraft type.
  */
 struct MassConfig {
-    double empty_mass_kg{9298.64};
+    double empty_mass_kg{9298.643585};
     double internal_fuel_capacity_kg{3175.1};
     double mtow_kg{19187.0};
     double Ixx{12875.0};
@@ -121,7 +121,7 @@ struct AircraftConfig {
             case AircraftType::F16_FIGHTING_FALCON: {
                 cfg.display_name = "F-16C Fighting Falcon";
                 cfg.mass = MassConfig{
-                    9298.64, 3175.1, 19187.0,
+                    9298.643585, 3175.1, 19187.0,
                     12875.0, 75674.0, 85552.0, 1331.0
                 };
                 cfg.propulsion = PropulsionConfig{

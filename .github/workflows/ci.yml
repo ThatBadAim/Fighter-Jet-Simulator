@@ -59,7 +59,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential libepoxy-dev \
-              libgl1-mesa-dev libosmesa6-dev xvfb ninja-build cmake
+              libgl1-mesa-dev libosmesa6-dev xvfb ninja-build cmake \
+              libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev
           # SDL3 is not yet in the Ubuntu archive; build it from source.
           git clone --depth 1 --branch release-3.2.8 \
               https://github.com/libsdl-org/SDL.git /tmp/SDL
