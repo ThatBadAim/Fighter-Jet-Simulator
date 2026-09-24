@@ -7,6 +7,7 @@
 #include "fastjet/fdm/flight_state.hpp"
 #include "fastjet/flcs/imu_sensor.hpp"
 #include "fastjet/environment/atmosphere1976.hpp"
+#include "fastjet/environment/ground_collision.hpp"
 #include <vector>
 #include <algorithm>
 #include <cmath>
@@ -331,8 +332,8 @@ public:
         // rather than only at the moment it is switched.
         // =========================================================================
         {
-            const float type_x = -D * std::tan(0.135f);
-            const float type_y =  D * std::tan(0.112f);
+            const float type_x = -D * std::tan(0.125f);
+            const float type_y =  D * std::tan(0.120f);
             const auto short_name = aircraft::to_short_string(tel.aircraft_type);
             char type_buf[16];
             std::snprintf(type_buf, sizeof(type_buf), "%.*s",
@@ -584,7 +585,7 @@ public:
         // Positioned safely within combiner glass top aperture
         // =========================================================================
         {
-            const float top_y = D * std::tan(0.145f); // ~8.3 degrees above boresight
+            const float top_y = D * std::tan(0.150f); // ~8.6 degrees above boresight
             const float tape_w = D * std::tan(0.082f); // ~4.7 degrees half-width
 
             // Baseline
@@ -621,7 +622,7 @@ public:
         // =========================================================================
         {
             const float cas_x = -D * std::tan(0.082f); // ~4.7 deg left
-            const float cas_y =  D * std::tan(0.065f); // ~3.7 deg up (comfortably inside glass)
+            const float cas_y =  D * std::tan(0.082f); // ~4.7 deg up (comfortably inside glass)
             const float box_w =  D * 0.046f;
             const float box_h =  D * 0.022f;
 
@@ -634,7 +635,7 @@ public:
             draw_string_centered(cas_str, cas_x, cas_y, D * 0.011f, -D, hud_col);
 
             // Mach readout directly beneath airspeed box (MIL-STD-1787 HUD symbology)
-            // Cleanly placed at +2.3 deg elevation, preventing any collision with G-meter
+            // Cleanly placed at +3.3 deg elevation, preventing any collision with G-meter
             const auto air = environment::Atmosphere1976::compute(state.altitude(), state.airspeed());
             const float mach = static_cast<float>(air.mach_number);
             char mach_str[12];
@@ -652,7 +653,7 @@ public:
         // =========================================================================
         {
             const float alt_x = D * std::tan(0.082f); // ~4.7 deg right
-            const float alt_y = D * std::tan(0.065f); // ~3.7 deg up (level with CAS box)
+            const float alt_y = D * std::tan(0.082f); // ~4.7 deg up (level with CAS box)
             const float box_w = D * 0.052f;
             const float box_h = D * 0.022f;
 
@@ -666,10 +667,11 @@ public:
 
         // =========================================================================
         // 7. G-Meter (Bottom Left) - cleanly below Mach with dedicated spacing
+        // Positioned well above bottom bezel of combiner glass
         // =========================================================================
         {
             const float g_x = -D * std::tan(0.082f);
-            const float g_y =  D * std::tan(0.015f); // ~0.8 deg up (well below Mach at +2.3 deg)
+            const float g_y =  D * std::tan(0.038f); // ~2.2 deg up (well above bottom bezel at -1.6 deg)
 
             char g_str[12];
             std::snprintf(g_str, sizeof(g_str), "%2.1fG", std::abs(static_cast<float>(imu.Nz)));
@@ -688,21 +690,21 @@ public:
             // Speedbrake deployed annunciator
             if (tel.speedbrake_pos > 0.05) {
                 const float sb_x = -D * std::tan(0.082f) - D * 0.015f;
-                const float sb_y = -D * std::tan(0.006f);
+                const float sb_y =  D * std::tan(0.012f);
                 draw_string("SPDBRK", sb_x, sb_y, D * 0.0085f, -D, Color4::amber());
             }
 
-            // Low altitude gear warning (< 350m, IAS < 140 m/s with gear up)
-            if (!tel.gear_deployed && state.altitude() < 350.0 && state.airspeed() < 140.0) {
+            // Low altitude gear warning (< 350m AGL, IAS < 140 m/s with gear up)
+            if (!tel.gear_deployed && environment::GroundCollision::get_agl(state) < 350.0 && state.airspeed() < 140.0) {
                 const float gear_x = 0.0f;
-                const float gear_y = D * std::tan(0.025f);
+                const float gear_y = D * std::tan(0.040f);
                 draw_string_centered("CHECK GEAR", gear_x, gear_y, D * 0.011f, -D, Color4::amber());
             }
 
             // Afterburner engaged flag
             if (std::string(tel.detent_str) == "AFTERBURNER") {
                 const float ab_x = D * std::tan(0.082f);
-                const float ab_y = D * std::tan(0.065f) - (D * 0.022f * 0.5f) - D * 0.014f;
+                const float ab_y = D * std::tan(0.082f) - (D * 0.022f * 0.5f) - D * 0.014f;
                 draw_string_centered("AB", ab_x, ab_y, D * 0.010f, -D, Color4::amber());
             }
         }

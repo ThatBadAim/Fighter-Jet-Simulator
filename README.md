@@ -160,6 +160,12 @@ Defined in [`include/fastjet/graphics/`](include/fastjet/graphics/):
 - **Flight Instruments (Render-to-Texture)** ([`flight_instruments.hpp`](include/fastjet/graphics/flight_instruments.hpp)):
   - Off-screen $512 \times 512$ Framebuffer Object (FBO) dynamically rendering the three-light AoA indexer (slow chevron, on-speed donut, fast chevron), Attitude Director Indicator (ADI) ball with sky/ground split, and Mach number tape.
   - Mapped directly as a material texture onto the cockpit dashboard MFD panel.
+- **Live Cockpit Gauges** ([`cockpit_gauges.hpp`](include/fastjet/graphics/cockpit_gauges.hpp)):
+  - Every painted instrument in the asset cockpit has a working face laid 1.5 mm over it: airspeed/Mach, counter-pointer altimeter (with the below-10,000 ft crosshatch), ADI, HSI, AOA and VVI tapes, fuel quantity and totalizer, fuel flow, oil, nozzle, RPM, FTIT, cabin altitude, hydraulic A/B and the clock.
+  - The DED shows a CNI page with the local time; the eyebrow warning lamps (ENG FIRE, ENGINE, HYD/OIL PRESS, FLCS, TO/LDG CONFIG) and the three gear-down lamps follow the aircraft's state.
+  - The HSI shows the runway course with centreline deviation, and a TACAN bearing pointer and DME to the field.
+  - Pointers move through first-order lags, as the mechanical instruments do: engine gauges follow the spool, and the VVI trails the climb rate.
+  - Placements were measured by mapping each painted dial's texture rectangle back through the cockpit mesh ([`ModelGLB::cockpit_gauges()`](include/fastjet/graphics/model_glb.hpp)). Round dials leave their corners transparent, so the painted bezels and screws still show.
 - **Atmosphere & Environment** ([`sky_ground_renderer.hpp`](include/fastjet/graphics/sky_ground_renderer.hpp)):
   - Analytic single-scattering sky: wavelength-dependent Rayleigh ($\beta \propto \lambda^{-4}$) plus Henyey-Greenstein Mie aerosol scattering, with a sun disc and aureole.
   - Radiance along a view ray, where $\tau$ is the vertical optical depth and $m$ the air mass:
@@ -177,6 +183,29 @@ $$L = \left(\tau_R\,\Phi_R(\theta) + \tau_M\,\Phi_M(\theta)\right) m \cdot \frac
   - Four concentric LOD rings ($125\text{ m}$ to $3{,}200\text{ m}$ spacing) reaching $91\text{ km}$: ~27k triangles total, built once at init, zero per-frame allocation.
   - Shaded by elevation and slope (lowland green, dry upland, exposed rock, snow only on high shallow ground) with sun and sky-ambient lighting in linear space.
   - $3,000\text{ m} \times 60\text{ m}$ runway with centerline, edge lines, threshold piano keys, touchdown-zone bars, and aiming-point blocks. The terrain mesh cuts a hole for the airfield rather than z-fighting decals that sit $20\text{ cm}$ above it.
+- **Rendering Pipeline** ([`render_engine.hpp`](include/fastjet/graphics/render_engine.hpp), [`hdr_pipeline.hpp`](include/fastjet/graphics/hdr_pipeline.hpp)):
+  - The world renders as linear radiance into a multisampled `R11F_G11F_B10F` target, then gets energy-conserving bloom (13-tap downsample, tent upsample), the ACES filmic curve, lens vignette and G-LOC greyout in one composite pass. The cockpit, HUD and menus are drawn afterwards with the same curve, so they stay crisp.
+  - Sun colour and sky ambient come from a CPU mirror of the sky shader ([`scene_lighting.hpp`](include/fastjet/graphics/scene_lighting.hpp)), so every surface is lit by the sky it sits under. All shaders share one GLSL library ([`shader_library.hpp`](include/fastjet/graphics/shader_library.hpp)).
+- **Airframe and Cockpit** ([`model_glb.hpp`](include/fastjet/graphics/model_glb.hpp)):
+  - glTF metallic-roughness shading: sRGB base colour, packed roughness/metal and tangent-space normal maps, a GGX sun term, and reflections of the real sky and ground. The gold-tinted canopy uses dual-source blending to reflect and tint at once.
+  - The cockpit view flies from the asset's textured cockpit. The live MFD pages are mapped onto its two display screens, and the HUD is masked by its combiner glass. [`cockpit_geometry.hpp`](include/fastjet/graphics/cockpit_geometry.hpp) remains as the fallback.
+  - The asset is authored Y-up and converted to body axes at load. Each view seats it where it matters: wheels on the gear contact points in the chase view, canopy and HUD around the design eye point in the cockpit.
+- **Shadows, Clouds and Effects**:
+  - Sun shadow map fitted tightly around the aircraft ([`shadow_map.hpp`](include/fastjet/graphics/shadow_map.hpp)), texel-snapped and in origin-relative coordinates. It gives self-shadowing, the jet's shadow on the runway (fading with height), and canopy-frame shadows across the cockpit.
+  - Scattered cumulus deck with cloud shadows ([`cloud_layer.hpp`](include/fastjet/graphics/cloud_layer.hpp)), built from one wind-drifted field baked to a map in slices across frames; cirrus is a baked tiling texture in the sky. The afterburner plume has shock diamonds ([`exhaust_plume.hpp`](include/fastjet/graphics/exhaust_plume.hpp)).
+  - The ground material (strip farmland with hedgerows, woods, lakes, rock, snow, mown infield) is baked once into three nested world-space textures ([`terrain_textures.hpp`](include/fastjet/graphics/terrain_textures.hpp)). Pavement, rubber deposits, worn paint and emissive runway lights are shaded procedurally.
+  - The settings quality preset ([`render_quality.hpp`](include/fastjet/graphics/render_quality.hpp)) sets scene MSAA, shadow resolution, bloom, cirrus and exhaust, and applies without a restart.
+
+### 11. Threading and Frame Pacing
+
+The frame itself is GPU-bound: physics costs about 3 µs per 200 Hz step and the CPU submits a frame in under 1 ms, so the render loop stays on one thread (the GL context's) and the other cores take the work that would otherwise stall it.
+
+- **Worker pool** ([`thread_pool.hpp`](include/fastjet/core/thread_pool.hpp)): one worker per hardware thread beyond the main one. `parallel_for` has the caller work through chunks as well, so it cannot deadlock, even nested or with every worker busy.
+- **Loading**: the airframe file is read and its three 4096² textures decoded in parallel on the workers, while the main thread builds the terrain, whose mesh and texture bakes are themselves sampled across the pool. Results are bit-identical to a serial build. Engine start-up is about 2.3× faster (1.12 s to 0.49 s on a 2-core/4-thread laptop).
+- **Audio** ([`audio_engine.hpp`](include/fastjet/audio/audio_engine.hpp)): samples are mixed on SDL's audio thread, so a long frame can no longer starve the device; the main thread only sets parameters, under SDL's stream lock.
+- **Frame pacing** ([`frame_pacer.hpp`](include/fastjet/graphics/frame_pacer.hpp)): a fence after each swap keeps the loop at most two frames ahead of the GPU. Without it a GPU-bound loop ran dozens of frames ahead and then stalled, so measured frame times swung between 0.5 ms and 100 ms; with it they hold within about 1 ms of the GPU's own rate, and input is sampled close to when it is drawn.
+- **GPU savings with unchanged images** (verified by pixel diff): the cockpit interior is drawn before the hull so early-Z rejects the hidden hull; the display atlases have no unused depth buffer, the MFD atlas is sized to the screens the asset cockpit has, and neither redraws in the chase view. At 1080p Ultra that is about +13% frame rate in both views.
+- **`--profile`** prints the frame-time distribution, CPU time per loop stage and GPU time per render pass (timestamp queries that never stall, [`gpu_profiler.hpp`](include/fastjet/graphics/gpu_profiler.hpp)) every two seconds.
 
 ---
 
@@ -195,6 +224,8 @@ $$L = \left(\tau_R\,\Phi_R(\theta) + \tau_M\,\Phi_M(\theta)\right) m \cdot \frac
 │       │   ├── f16_aero_model.hpp    # Total force & moment synthesizer
 │       │   ├── interpolator.hpp      # Zero-allocation 1D/2D/3D interpolators
 │       │   └── tp1538_tables.hpp     # NASA TP-1538 wind-tunnel lookup tables
+│       ├── core/
+│       │   └── thread_pool.hpp       # Worker pool: parallel_for and background jobs
 │       ├── environment/
 │       │   └── atmosphere1976.hpp    # 1976 US Standard Atmosphere
 │       ├── fdm/
@@ -217,15 +248,29 @@ $$L = \left(\tau_R\,\Phi_R(\theta) + \tau_M\,\Phi_M(\theta)\right) m \cdot \frac
 │       │   └── pitch_controller.hpp  # Blended q/Nz, +9G & 25.5 AoA limiters
 │       ├── graphics/
 │       │   ├── camera_rig.hpp        # F-16 DEP camera rig with G-load spring-damper
-│       │   ├── cockpit_geometry.hpp  # 3D low-poly cockpit shell, MFD quad, combiner glass
+│       │   ├── cloud_layer.hpp       # Cumulus deck and its baked shadow map
+│       │   ├── cockpit_gauges.hpp    # Live faces for the cockpit's dials, DED and lamps
+│       │   ├── cockpit_geometry.hpp  # Fallback cockpit shell, MFD screens, combiner glass
+│       │   ├── exhaust_plume.hpp     # Afterburner plume and nozzle glow
 │       │   ├── flight_instruments.hpp# FBO render-to-texture AoA indexer, ADI, Mach tape
+│       │   ├── frame_context.hpp     # Per-frame lighting, clouds and shadow for all passes
+│       │   ├── frame_pacer.hpp       # Fence-based bound on frames queued ahead of the GPU
 │       │   ├── gl_common.hpp         # Mat4, Color4, and OpenGL utilities
+│       │   ├── gpu_profiler.hpp      # Per-pass GPU timing (--profile)
+│       │   ├── hdr_pipeline.hpp      # HDR target, bloom, ACES composite, G-LOC overlay
 │       │   ├── hud_collimator.hpp    # Optical-infinity collimated HUD and FPM
+│       │   ├── instrument_canvas.hpp # Off-screen 2D vector/text canvas for the displays
+│       │   ├── model_glb.hpp         # glTF airframe/cockpit loader and PBR renderer
 │       │   ├── render_engine.hpp     # Master multi-pass graphics rendering engine
+│       │   ├── render_quality.hpp    # Quality presets and weather state
+│       │   ├── scene_lighting.hpp    # CPU scattering mirror: sun colour, sky ambient
 │       │   ├── shader.hpp            # GLSL compilation and uniform bindings
+│       │   ├── shader_library.hpp    # Shared GLSL: noise, tonemap, atmosphere, BRDF
+│       │   ├── shadow_map.hpp        # Sun shadow map fitted around the aircraft
 │       │   ├── sky_ground_renderer.hpp# Scattering sky, aerial perspective, airfield
 │       │   ├── terrain_field.hpp     # Deterministic ridged-fBm procedural heightfield
-│       │   └── terrain_mesh.hpp      # Concentric LOD ring mesh built from the field
+│       │   ├── terrain_mesh.hpp      # Concentric LOD ring mesh built from the field
+│       │   └── terrain_textures.hpp  # Ground material baked into nested textures
 │       ├── input/
 │       │   ├── avionics_controls.hpp # Digital trim hat, throttle detents, speedbrakes
 │       │   ├── input_config.hpp      # Controller profiles & pure C++20 JSON persistence
@@ -260,6 +305,8 @@ $$L = \left(\tau_R\,\Phi_R(\theta) + \tau_M\,\Phi_M(\theta)\right) m \cdot \frac
     ├── test_performance.cpp          # Zero-heap allocation check & 6M step/s benchmark
     ├── test_pitch_divergence.cpp     # Open-loop pitch divergence test (No FLCS)
     ├── test_propulsion.cpp           # Thrust lapse, spool lag, fuel burn, variable mass
+    ├── test_render_fidelity.cpp      # Lighting, shadows, HDR, clouds, model orientation
+    ├── test_thread_pool.cpp          # Worker pool and deterministic parallel terrain bake
     ├── test_render_pipeline.cpp      # Multi-pass OpenGL graphics pipeline verification
     ├── test_signal_conditioning.cpp  # Dual deadbands, calibration, and inversion
     ├── test_throttle_control.cpp     # Throttle slew, afterburner accel, deceleration
@@ -310,6 +357,8 @@ make viewer
 | T | Trim reset |
 | R | Reset simulation |
 | Esc | Exit |
+
+Run with `--profile` to print frame timing and the GPU cost of each render pass every two seconds.
 
 ### CMake
 

@@ -16,7 +16,9 @@ namespace fdm {
  */
 class FuelSystem {
 public:
-    static constexpr double EMPTY_MASS_KG = 9298.643585; // 20,500 lb
+    /// F-16C empty weight [kg] (19,700 lb), the default airframe's.
+    static constexpr double EMPTY_MASS_KG =
+        aircraft::AircraftConfig::get(aircraft::AircraftType::F16_FIGHTING_FALCON).mass.empty_mass_kg;
 
     /**
      * @brief Builds mass properties for a given fuel load and aircraft type.
@@ -31,14 +33,15 @@ public:
     ) noexcept {
         const auto cfg = aircraft::AircraftConfig::get(type);
         const double fuel = std::max(0.0, fuel_kg);
-        const double gross_mass = cfg.mass.empty_mass_kg + fuel;
+        const double empty_mass = cfg.mass.empty_mass_kg;
+        const double gross_mass = empty_mass + fuel;
 
         // Empty-airframe inertia
         const MassProperties empty = MassProperties::create(type);
 
         // Scale the tensor by the mass ratio.
-        const double ratio = (cfg.mass.empty_mass_kg > 0.0)
-                           ? (gross_mass / cfg.mass.empty_mass_kg)
+        const double ratio = (empty_mass > 0.0)
+                           ? (gross_mass / empty_mass)
                            : 1.0;
 
         return MassProperties(

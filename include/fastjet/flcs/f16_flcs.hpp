@@ -36,6 +36,7 @@ public:
         flaperon.reset(init_da);
         rudder.reset(init_dr);
         pitch_ctrl.reset();
+        lat_dir_ctrl.reset();
     }
 
     /**
@@ -78,7 +79,7 @@ public:
         // 3. Roll & Yaw Axes Control Laws
         double da_cmd{0.0};
         double dr_cmd{0.0};
-        lat_dir_ctrl.update(pilot, imu, da_cmd, dr_cmd);
+        lat_dir_ctrl.update(dt, pilot, imu, da_cmd, dr_cmd);
 
         // 4. Step Hydraulic Actuators (Lag filter + rate limits + deflection limits)
         const double de_actual = stabilator.step(de_cmd, dt);

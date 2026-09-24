@@ -1,5 +1,17 @@
 #pragma once
 
+#if !defined(_WIN32) && defined(__has_include) && __has_include(<GL/gl.h>)
+#if defined(__linux__) && __has_include_next(<epoxy/gl.h>)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
+#include_next <epoxy/gl.h>
+#pragma GCC diagnostic pop
+#elif defined(__linux__)
+#include </usr/include/epoxy/gl.h>
+#else
+#include <GL/gl.h>
+#endif
+#else
 #if defined(_WIN32) || !defined(__has_include) || !__has_include(<epoxy/gl.h>)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -41,6 +53,65 @@ typedef char GLchar;
 #define GL_POLYGON_OFFSET_FILL 0x8037
 #define GL_CLAMP_TO_EDGE 0x812F
 #define GL_MULTISAMPLE 0x809D
+#endif
+
+// Formats, targets and enums of the HDR, shadow and bake passes (GL 3.x).
+#ifndef GL_DEPTH_ATTACHMENT
+#define GL_DEPTH_ATTACHMENT 0x8D00
+#endif
+#ifndef GL_READ_FRAMEBUFFER
+#define GL_READ_FRAMEBUFFER 0x8CA8
+#endif
+#ifndef GL_DRAW_FRAMEBUFFER
+#define GL_DRAW_FRAMEBUFFER 0x8CA9
+#endif
+#ifndef GL_MAX_SAMPLES
+#define GL_MAX_SAMPLES 0x8D57
+#endif
+#ifndef GL_TEXTURE_COMPARE_MODE
+#define GL_TEXTURE_COMPARE_MODE 0x884C
+#endif
+#ifndef GL_TEXTURE_COMPARE_FUNC
+#define GL_TEXTURE_COMPARE_FUNC 0x884D
+#endif
+#ifndef GL_COMPARE_REF_TO_TEXTURE
+#define GL_COMPARE_REF_TO_TEXTURE 0x884E
+#endif
+#ifndef GL_RGBA16F
+#define GL_RGBA16F 0x881A
+#endif
+#ifndef GL_R11F_G11F_B10F
+#define GL_R11F_G11F_B10F 0x8C3A
+#endif
+#ifndef GL_R32F
+#define GL_R32F 0x822E
+#endif
+#ifndef GL_R8
+#define GL_R8 0x8229
+#endif
+#ifndef GL_SRGB8_ALPHA8
+#define GL_SRGB8_ALPHA8 0x8C43
+#endif
+#ifndef GL_SRC1_COLOR
+#define GL_SRC1_COLOR 0x88F9
+#endif
+#ifndef GL_NUM_EXTENSIONS
+#define GL_NUM_EXTENSIONS 0x821D
+#endif
+#ifndef GL_TEXTURE_MAX_ANISOTROPY_EXT
+#define GL_TEXTURE_MAX_ANISOTROPY_EXT 0x84FE
+#endif
+#ifndef GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT
+#define GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT 0x84FF
+#endif
+#ifndef GL_DEPTH_COMPONENT24
+#define GL_DEPTH_COMPONENT24 0x81A6
+#endif
+#ifndef GL_STREAM_DRAW
+#define GL_STREAM_DRAW 0x88E0
+#endif
+#ifndef GL_TEXTURE1
+#define GL_TEXTURE1 0x84C1
 #endif
 
 // Function pointer declarations
@@ -88,6 +159,10 @@ typedef void (APIENTRYP PFNGLFRAMEBUFFERRENDERBUFFERPROC)(GLenum target, GLenum 
 typedef void (APIENTRYP PFNGLDELETERENDERBUFFERSPROC)(GLsizei n, const GLuint *renderbuffers);
 typedef void (APIENTRYP PFNGLGENERATEMIPMAPPROC)(GLenum target);
 typedef void (APIENTRYP PFNGLACTIVETEXTUREPROC)(GLenum texture);
+typedef void (APIENTRYP PFNGLBLITFRAMEBUFFERPROC)(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1, GLint dstX0, GLint dstY0, GLint dstX1, GLint dstY1, GLbitfield mask, GLenum filter);
+typedef void (APIENTRYP PFNGLRENDERBUFFERSTORAGEMULTISAMPLEPROC)(GLenum target, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height);
+typedef const GLubyte* (APIENTRYP PFNGLGETSTRINGIPROC)(GLenum name, GLuint index);
+typedef void (APIENTRYP PFNGLBLENDFUNCSEPARATEPROC)(GLenum sfactorRGB, GLenum dfactorRGB, GLenum sfactorAlpha, GLenum dfactorAlpha);
 
 struct FastJetGLFunctions {
     PFNGLGENVERTEXARRAYSPROC genVertexArrays = nullptr;
@@ -134,6 +209,10 @@ struct FastJetGLFunctions {
     PFNGLDELETERENDERBUFFERSPROC deleteRenderbuffers = nullptr;
     PFNGLGENERATEMIPMAPPROC generateMipmap = nullptr;
     PFNGLACTIVETEXTUREPROC activeTexture = nullptr;
+    PFNGLBLITFRAMEBUFFERPROC blitFramebuffer = nullptr;
+    PFNGLRENDERBUFFERSTORAGEMULTISAMPLEPROC renderbufferStorageMultisample = nullptr;
+    PFNGLGETSTRINGIPROC getStringi = nullptr;
+    PFNGLBLENDFUNCSEPARATEPROC blendFuncSeparate = nullptr;
 
     static FastJetGLFunctions& instance() {
         static FastJetGLFunctions fn;
@@ -185,6 +264,10 @@ struct FastJetGLFunctions {
         deleteRenderbuffers = (PFNGLDELETERENDERBUFFERSPROC)SDL_GL_GetProcAddress("glDeleteRenderbuffers");
         generateMipmap = (PFNGLGENERATEMIPMAPPROC)SDL_GL_GetProcAddress("glGenerateMipmap");
         activeTexture = (PFNGLACTIVETEXTUREPROC)SDL_GL_GetProcAddress("glActiveTexture");
+        blitFramebuffer = (PFNGLBLITFRAMEBUFFERPROC)SDL_GL_GetProcAddress("glBlitFramebuffer");
+        renderbufferStorageMultisample = (PFNGLRENDERBUFFERSTORAGEMULTISAMPLEPROC)SDL_GL_GetProcAddress("glRenderbufferStorageMultisample");
+        getStringi = (PFNGLGETSTRINGIPROC)SDL_GL_GetProcAddress("glGetStringi");
+        blendFuncSeparate = (PFNGLBLENDFUNCSEPARATEPROC)SDL_GL_GetProcAddress("glBlendFuncSeparate");
     }
 };
 
@@ -232,5 +315,11 @@ struct FastJetGLFunctions {
 #define glDeleteRenderbuffers FastJetGLFunctions::instance().deleteRenderbuffers
 #define glGenerateMipmap FastJetGLFunctions::instance().generateMipmap
 #define glActiveTexture FastJetGLFunctions::instance().activeTexture
+#define glBlitFramebuffer FastJetGLFunctions::instance().blitFramebuffer
+#define glRenderbufferStorageMultisample FastJetGLFunctions::instance().renderbufferStorageMultisample
+#define glGetStringi FastJetGLFunctions::instance().getStringi
+#define glBlendFuncSeparate FastJetGLFunctions::instance().blendFuncSeparate
+
+#endif
 
 #endif

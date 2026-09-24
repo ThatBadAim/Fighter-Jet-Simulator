@@ -2,6 +2,8 @@
 
 #include "fastjet/graphics/gl_common.hpp"
 #include "fastjet/graphics/shader.hpp"
+#include <array>
+#include <cmath>
 #include <vector>
 
 namespace fastjet::graphics {
@@ -12,6 +14,15 @@ struct Vertex3D {
     float normal[3];
     float uv[2];
     float color[4];
+};
+
+/// @brief A display surface in body axes: corners top-left, top-right,
+/// bottom-right, bottom-left, and the instrument-atlas cell it shows.
+struct ScreenQuad {
+    std::array<std::array<float, 3>, 4> corners{};
+    float u0 = 0.0f, u1 = 1.0f; ///< Atlas U, left to right
+    float v0 = 0.0f, v1 = 1.0f; ///< Atlas V, bottom to top
+    float brightness = 1.0f;    ///< Output scale: 1 for self-lit displays
 };
 
 /// @brief Low-poly F-16 cockpit shell, combiner glass polygon, and instrument MFD panels
@@ -28,6 +39,10 @@ private:
     GLuint glass_vao_ = 0;
     GLuint glass_vbo_ = 0;
     GLsizei glass_vertex_count_ = 0;
+
+    GLuint gauge_vao_ = 0;
+    GLuint gauge_vbo_ = 0;
+    GLsizei gauge_vertex_count_ = 0;
 
     bool initialized_ = false;
 
@@ -529,6 +544,50 @@ private:
         glBindVertexArray(0);
     }
 
+    /// @brief Uploads display quads into `vbo`, replacing its contents.
+    /// @return Vertex count uploaded
+    static GLsizei upload_quads(GLuint vbo, const std::vector<ScreenQuad>& screens) {
+        std::vector<Vertex3D> vertices;
+        for (const ScreenQuad& q : screens) {
+            // Face normal from the edges, pointing at the pilot.
+            const auto& c = q.corners;
+            const float ex[3] = {c[1][0] - c[0][0], c[1][1] - c[0][1], c[1][2] - c[0][2]};
+            const float ey[3] = {c[3][0] - c[0][0], c[3][1] - c[0][1], c[3][2] - c[0][2]};
+            float n[3] = {ex[1] * ey[2] - ex[2] * ey[1], ex[2] * ey[0] - ex[0] * ey[2], ex[0] * ey[1] - ex[1] * ey[0]};
+            const float len = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+            if (len > 0.0f) { n[0] /= len; n[1] /= len; n[2] /= len; }
+            if (n[0] > 0.0f) { n[0] = -n[0]; n[1] = -n[1]; n[2] = -n[2]; }
+            const float uv[4][2] = {{q.u0, q.v1}, {q.u1, q.v1}, {q.u1, q.v0}, {q.u0, q.v0}};
+            const float b = q.brightness;
+            auto vert = [&](int i) {
+                return Vertex3D{{c[i][0], c[i][1], c[i][2]}, {n[0], n[1], n[2]}, {uv[i][0], uv[i][1]}, {b, b, b, 1.0f}};
+            };
+            for (int i : {0, 1, 2, 0, 2, 3}) vertices.push_back(vert(i));
+        }
+        glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(vertices.size() * sizeof(Vertex3D)), vertices.data(),
+                     GL_STATIC_DRAW);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        return static_cast<GLsizei>(vertices.size());
+    }
+
+    /// @brief VAO over `vbo` with the Vertex3D layout.
+    static void make_vertex_array(GLuint& vao, GLuint& vbo) {
+        glGenVertexArrays(1, &vao);
+        glGenBuffers(1, &vbo);
+        glBindVertexArray(vao);
+        glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex3D), (void*)offsetof(Vertex3D, pos));
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex3D), (void*)offsetof(Vertex3D, normal));
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex3D), (void*)offsetof(Vertex3D, uv));
+        glEnableVertexAttribArray(2);
+        glVertexAttribPointer(3, 4, GL_FLOAT, GL_FALSE, sizeof(Vertex3D), (void*)offsetof(Vertex3D, color));
+        glEnableVertexAttribArray(3);
+        glBindVertexArray(0);
+    }
+
     void build_combiner_glass() {
         // Physical HUD Combiner Glass Polygon (tilted trapezoid in front of pilot eye):
         // Eye is at DEP: X=1.80, Y=0.0, Z=-0.65
@@ -590,6 +649,7 @@ public:
             build_cockpit_shell();
             build_mfd_panel();
             build_combiner_glass();
+            make_vertex_array(gauge_vao_, gauge_vbo_);
             initialized_ = true;
         }
     }
@@ -601,6 +661,9 @@ public:
         if (mfd_vbo_) { glDeleteBuffers(1, &mfd_vbo_); mfd_vbo_ = 0; }
         if (glass_vao_) { glDeleteVertexArrays(1, &glass_vao_); glass_vao_ = 0; }
         if (glass_vbo_) { glDeleteBuffers(1, &glass_vbo_); glass_vbo_ = 0; }
+        if (gauge_vao_) { glDeleteVertexArrays(1, &gauge_vao_); gauge_vao_ = 0; }
+        if (gauge_vbo_) { glDeleteBuffers(1, &gauge_vbo_); gauge_vbo_ = 0; }
+        gauge_vertex_count_ = 0;
         initialized_ = false;
     }
 
@@ -613,11 +676,33 @@ public:
         }
     }
 
-    /// @brief Render MFD display quad
+    /// @brief Moves the live displays onto other screens (e.g. the airframe
+    /// model's own cockpit), replacing the built-in MFD layout.
+    void use_screens(const std::vector<ScreenQuad>& screens) {
+        if (initialized_) mfd_vertex_count_ = upload_quads(mfd_vbo_, screens);
+    }
+
+    /// @brief Places the live instrument faces (CockpitGauges atlas cells).
+    void use_gauges(const std::vector<ScreenQuad>& gauges) {
+        if (initialized_) gauge_vertex_count_ = upload_quads(gauge_vbo_, gauges);
+    }
+
+    [[nodiscard]] bool has_gauges() const noexcept { return gauge_vertex_count_ > 0; }
+
+    /// @brief Render MFD display quads
     void draw_mfd() const noexcept {
         if (mfd_vao_) {
             glBindVertexArray(mfd_vao_);
             glDrawArrays(GL_TRIANGLES, 0, mfd_vertex_count_);
+            glBindVertexArray(0);
+        }
+    }
+
+    /// @brief Render the instrument-face quads
+    void draw_gauges() const noexcept {
+        if (gauge_vao_ && gauge_vertex_count_ > 0) {
+            glBindVertexArray(gauge_vao_);
+            glDrawArrays(GL_TRIANGLES, 0, gauge_vertex_count_);
             glBindVertexArray(0);
         }
     }

@@ -61,7 +61,7 @@ enum class AircraftType {
         case AircraftType::F16_FIGHTING_FALCON: return "1 ENG  9.0G  M2.05";
         case AircraftType::F15EX_EAGLE_II:      return "2 ENG  9.0G  M2.50";
         case AircraftType::EUROFIGHTER_TYPHOON: return "2 ENG  9.0G  SUPERCRUISE M1.50";
-        case AircraftType::F22_RAPTOR:          return "2 ENG  9.5G  SUPERCRUISE M1.82  TVC";
+        case AircraftType::F22_RAPTOR:          return "2 ENG  9.0G  SUPERCRUISE M1.82  TVC";
         case AircraftType::A10_THUNDERBOLT:     return "2 ENG  7.33G  M0.56  NO AB";
     }
     return "";

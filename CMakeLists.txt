@@ -30,6 +30,9 @@ target_include_directories(fastjet INTERFACE
     $<INSTALL_INTERFACE:include>)
 
 target_compile_features(fastjet INTERFACE cxx_std_20)
+# Worker threads (fastjet/core/thread_pool.hpp) for loading and baking.
+find_package(Threads REQUIRED)
+target_link_libraries(fastjet INTERFACE Threads::Threads)
 target_compile_definitions(fastjet INTERFACE _USE_MATH_DEFINES _CRT_SECURE_NO_WARNINGS)
 
 if(FASTJET_NATIVE_ARCH AND NOT MSVC)
@@ -77,6 +80,7 @@ if(FASTJET_BUILD_TESTS)
     # Pure physics tests: no graphics context required.
     set(FASTJET_CORE_TESTS
         test_atmosphere
+        test_thread_pool
         test_ballistic
         test_gyroscopic
         test_performance
@@ -100,7 +104,11 @@ if(FASTJET_BUILD_TESTS)
         test_terrain_field
         test_model_glb
         test_aircraft_specs
-        test_multi_aircraft_performance)
+        test_multi_aircraft_performance
+        test_ofc_handover
+        test_ofc_closed_loop
+        test_user_settings
+        test_menu_navigation)
 
     # Tests that need SDL3 and/or an OpenGL context.
     set(FASTJET_GRAPHICS_TESTS
@@ -110,7 +118,8 @@ if(FASTJET_BUILD_TESTS)
         test_hud_clipping
         test_flight_instruments
         test_render_pipeline
-        test_terrain_render)
+        test_terrain_render
+        test_render_fidelity)
 
     foreach(test_name IN LISTS FASTJET_CORE_TESTS)
         add_executable(${test_name} tests/${test_name}.cpp)

@@ -97,9 +97,13 @@ public:
             // rather than diverging as M -> 1.
             return 1.0 / std::sqrt(1.0 - MACH_TABLE_LIMIT * MACH_TABLE_LIMIT);
         }
-        // Supersonic: Ackeret-like 1/sqrt(M^2 - 1), bounded near M = 1.
-        const double m2 = std::max(mach * mach - 1.0, 0.10);
-        return 1.0 / std::sqrt(m2);
+        // Supersonic: Ackeret-like 1/sqrt(M^2 - 1), taken over only once it has
+        // fallen below the transonic plateau (M ~1.17).  Bounding it at M^2-1 >= 0.1
+        // instead jumped the factor from 1.67 to 3.1 just past MACH_PEAK — lift
+        // nearly doubled in one tick and the jet spiked well past its G limit.
+        const double plateau = 1.0 / std::sqrt(1.0 - MACH_TABLE_LIMIT * MACH_TABLE_LIMIT);
+        const double m2 = std::max(mach * mach - 1.0, 1e-6);
+        return std::min(plateau, 1.0 / std::sqrt(m2));
     }
 
     /**

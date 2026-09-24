@@ -120,9 +120,12 @@ struct AircraftConfig {
         switch (type) {
             case AircraftType::F16_FIGHTING_FALCON: {
                 cfg.display_name = "F-16C Fighting Falcon";
+                // 19,700 lb empty (USAF fact sheet), 7,000 lb internal fuel, 42,300 lb MTOW.
+                // Inertias are the Stevens & Lewis tensor (measured at 20,500 lb)
+                // scaled to the empty weight; FuelSystem scales them back up with fuel.
                 cfg.mass = MassConfig{
-                    9298.64, 3175.1, 19187.0,
-                    12875.0, 75674.0, 85552.0, 1331.0
+                    8935.8, 3175.1, 19187.0,
+                    12373.0, 72723.0, 82216.0, 1279.0
                 };
                 cfg.propulsion = PropulsionConfig{
                     1, 4450.0, 75600.0, 129000.0,
@@ -250,7 +253,7 @@ struct AircraftConfig {
                 // Integrated FBW + 2D TVC Mixer
                 cfg.flcs = FLCSConfig{
                     FLCSConfig::LawType::FBW_TVC_ALLOCATED,
-                    9.5, -3.0, 65.0, 280.0
+                    9.0, -3.0, 65.0, 280.0
                 };
                 // Wheelbase: 5.40m, Track: 3.40m
                 cfg.gear = LandingGearConfig{
@@ -264,9 +267,9 @@ struct AircraftConfig {
 
             case AircraftType::A10_THUNDERBOLT: {
                 cfg.display_name = "A-10C Thunderbolt II";
-                // 11,321 kg empty (24,959 lb), 4,853 kg fuel (10,700 lb), 22,680 kg MTOW
+                // 11,321 kg empty (24,959 lb), 4,990 kg fuel (11,000 lb), 22,680 kg MTOW
                 cfg.mass = MassConfig{
-                    11321.0, 4853.0, 22680.0,
+                    11321.0, 4990.0, 22680.0,
                     47047.0, 69689.0, 106432.0, -2440.0
                 };
                 // 2x GE TF34-GE-100A: 80.6 kN dry, NO AFTERBURNER!
@@ -280,16 +283,19 @@ struct AircraftConfig {
                 };
                 // High-aspect-ratio straight wing: AR = 6.54, high lift, high drag
                 // S_ref = 47.01 m^2 (506 sq ft), b = 17.53 m, c_bar = 3.03 m
+                // CD0 is the installed figure with 11 pylons: at 0.032 the jet ran
+                // ~450 kt level against a published 381 kt.  Thick-wing drag rise
+                // is steep past the M0.65 critical Mach.
                 cfg.aero = AeroConfig{
                     47.01, 17.526, 3.030, 6.54, 0.0,
-                    0.0320, 0.055, 5.1, 1.80,
-                    0.65, 0.85, 0.045, 0.040,
+                    0.043, 0.055, 5.1, 1.80,
+                    0.65, 0.85, 0.055, 0.045,
                     0.060, 0.000, -11.0, -0.55, -0.28
                 };
                 // Mechanical linkage with dual Pitch/Yaw Stability Augmentation System (SAS)
                 cfg.flcs = FLCSConfig{
                     FLCSConfig::LawType::HYDRO_SAS_AUGMENTED,
-                    7.33, -3.0, 18.0, 180.0
+                    7.33, -3.0, 18.0, 130.0
                 };
                 // Wide-stance gear. Nose gear offset 0.3m right for GAU-8 cannon!
                 // Wheelbase: 4.60m, Track: 5.24m

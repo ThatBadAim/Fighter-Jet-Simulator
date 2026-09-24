@@ -56,6 +56,14 @@ struct AvionicsTelemetry {
     // Hardware & Flight Control Status
     bool is_hardware_hotas   = false;
     const char* input_name   = "KEYBOARD";
+
+    // On-Board Flight Computer (OFC) Status
+    bool   ofc_gloc_active        = false;   ///< True while pilot is incapacitated (GLOC or recovery)
+    bool   ofc_gcas_active        = false;   ///< True while Auto-GCAS manoeuvre is executing
+    bool   ofc_tumble_active      = false;   ///< True while Auto-Tumble & Spin recovery is active
+    double ofc_gloc_blackout_frac = 0.0;     ///< Screen-space fade [0=clear, 1=full black]
+    double ofc_gcas_tti_sec       = 999.0;   ///< Seconds to terrain impact at current trajectory
+    double ofc_g_exposure         = 0.0;     ///< G-exposure accumulator value (debug / HUD readout)
 };
 
 } // namespace fastjet::graphics

@@ -194,6 +194,43 @@ struct Quaternion {
     }
 
     /**
+     * @brief Spherical Linear Interpolation (slerp) between two unit quaternions.
+     * @param q0 Start quaternion (t = 0)
+     * @param q1 End quaternion (t = 1)
+     * @param t Interpolation parameter in [0, 1]
+     */
+    [[nodiscard]] static Quaternion slerp(const Quaternion& q0, const Quaternion& q1, double t) noexcept {
+        double dot = q0.w * q1.w + q0.x * q1.x + q0.y * q1.y + q0.z * q1.z;
+        Quaternion target = q1;
+        if (dot < 0.0) {
+            dot = -dot;
+            target = {-q1.w, -q1.x, -q1.y, -q1.z};
+        }
+        if (dot > 0.9995) {
+            Quaternion q{
+                q0.w + t * (target.w - q0.w),
+                q0.x + t * (target.x - q0.x),
+                q0.y + t * (target.y - q0.y),
+                q0.z + t * (target.z - q0.z)
+            };
+            q.normalize();
+            return q;
+        }
+        const double theta_0 = std::acos(std::clamp(dot, -1.0, 1.0));
+        const double theta = theta_0 * t;
+        const double sin_theta = std::sin(theta);
+        const double sin_theta_0 = std::sin(theta_0);
+        const double s0 = std::cos(theta) - dot * sin_theta / sin_theta_0;
+        const double s1 = sin_theta / sin_theta_0;
+        return {
+            s0 * q0.w + s1 * target.w,
+            s0 * q0.x + s1 * target.x,
+            s0 * q0.y + s1 * target.y,
+            s0 * q0.z + s1 * target.z
+        };
+    }
+
+    /**
      * @brief Extract Euler angles (roll, pitch, yaw) in radians.
      * Note: Subject to gimbal lock at pitch = +/- pi/2, but quaternion integration itself is not.
      */

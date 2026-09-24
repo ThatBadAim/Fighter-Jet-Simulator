@@ -95,9 +95,13 @@ public:
         if (config.has_supercruise && !in_ab) {
             k_ram = 0.28;
         }
-        // Higher bypass engines (A-10 TF34) suffer greater momentum drag at speed
+        // Higher bypass engines (A-10 TF34, BPR ~6) suffer greater momentum drag at
+        // speed: installed thrust *falls* with Mach instead of gaining from ram
+        // recovery — the standard high-bypass lapse 1 - 0.49 sqrt(M) (Mattingly),
+        // ~63% of static at the A-10's M0.58 top speed.  A positive k_ram here let
+        // the A-10 run well past its 381 kt level-flight maximum.
         if (!config.has_afterburner) {
-            k_ram = 0.05;
+            return density_term * (1.0 - 0.49 * std::sqrt(mach));
         }
 
         const double ram_term = 1.0 + k_ram * mach * mach;
@@ -212,9 +216,9 @@ public:
         double my = 0.0;
 
         // 1. Vertical thrust offset arm (A-10 high nacelle is at Z = -1.2m above CG)
-        // Forward thrust Fx creates pitching moment: My = -Fx * z_offset
+        // M = r x F -> My = z * Fx (where z < 0 produces negative/nose-down My)
         if (config.thrust_z_offset_m != 0.0) {
-            my += -net_thrust_n * config.thrust_z_offset_m;
+            my += net_thrust_n * config.thrust_z_offset_m;
         }
 
         // 2. 2D Thrust Vectoring (F-22 nozzle deflection)

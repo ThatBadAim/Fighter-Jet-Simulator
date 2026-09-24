@@ -6,6 +6,7 @@
 #include "../fdm/mass_properties.hpp"
 #include "../aircraft/aircraft_type.hpp"
 #include "../aircraft/aircraft_config.hpp"
+#include "../graphics/terrain_field.hpp"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -188,9 +189,16 @@ public:
             // Its NED position: CG position plus the rotated offset.
             const math::Vector3 cp_ned_offset = state.q_att.rotate_body_to_ned(cp_b);
             const double cp_down = state.pos_ned.z + cp_ned_offset.z;
+            const double cp_x = state.pos_ned.x + cp_ned_offset.x;
+            const double cp_y = state.pos_ned.y + cp_ned_offset.y;
+
+            // Sample procedural terrain at wheel location (falls back to ground_elev if explicitly overridden)
+            const double terr_elev = -static_cast<double>(fastjet::graphics::TerrainField::height(
+                static_cast<float>(cp_x), static_cast<float>(cp_y)));
+            const double surface_z = (ground_elev != 0.0) ? ground_elev : terr_elev;
 
             // Penetration below the ground plane (positive when compressed).
-            const double penetration = cp_down - ground_elev;
+            const double penetration = cp_down - surface_z;
             if (penetration <= 0.0) {
                 continue; // Wheel is clear of the surface.
             }

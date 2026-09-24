@@ -1,6 +1,7 @@
 #pragma once
 
 #include "fastjet/graphics/gl_common.hpp"
+#include "fastjet/graphics/terrain_field.hpp"
 #include "fastjet/fdm/flight_state.hpp"
 #include "fastjet/flcs/imu_sensor.hpp"
 #include <algorithm>
@@ -160,15 +161,25 @@ public:
         disp_b_.z = std::clamp(disp_b_.z, static_cast<double>(LIMIT_Z_MIN), static_cast<double>(LIMIT_Z_MAX));
     }
 
+    /// @brief Toggle G-induced head displacement in cockpit view (default false for rock-solid MSFS/real-jet stability)
+    bool g_head_motion_{false};
+
     /// @brief Instantaneous pilot eye position in body coordinates [m]
+    /// Anchored to nominal DEP by default so the cockpit and HUD stay rock-solid in place on screen like MSFS and real jets
     math::Vector3 eye_pos_body() const noexcept {
-        return math::Vector3(DEP_X + disp_b_.x, DEP_Y + disp_b_.y, DEP_Z + disp_b_.z);
+        if (g_head_motion_) {
+            return math::Vector3(DEP_X + disp_b_.x, DEP_Y + disp_b_.y, DEP_Z + disp_b_.z);
+        }
+        return math::Vector3(DEP_X, DEP_Y, DEP_Z);
     }
 
     /// @brief Instantaneous pilot head displacement from nominal DEP [m]
     math::Vector3 head_displacement() const noexcept {
         return disp_b_;
     }
+
+    void set_g_head_motion(bool enabled) noexcept { g_head_motion_ = enabled; }
+    [[nodiscard]] bool g_head_motion() const noexcept { return g_head_motion_; }
 
     /// @brief World-space eye position in NED frame [m]
     math::Vector3 eye_pos_ned(const fdm::FlightState& state) const noexcept {
@@ -188,7 +199,15 @@ public:
             const double oz = -static_cast<double>(chase_height_) - static_cast<double>(chase_distance_ * sp);
 
             const math::Vector3 offset_ned = state.q_att.rotate_body_to_ned(math::Vector3(ox, oy, oz));
-            return state.pos_ned + offset_ned;
+            math::Vector3 pos = state.pos_ned + offset_ned;
+            // Prevent chase camera from dipping below the local terrain surface
+            const double terr_h = static_cast<double>(TerrainField::height(
+                static_cast<float>(pos.x), static_cast<float>(pos.y)));
+            const double max_cam_z = -terr_h - 0.75; // at least 0.75m above ground
+            if (pos.z > max_cam_z) {
+                pos.z = max_cam_z;
+            }
+            return pos;
         }
     }
 

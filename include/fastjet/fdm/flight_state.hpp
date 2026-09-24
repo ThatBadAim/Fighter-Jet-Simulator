@@ -100,6 +100,23 @@ struct FlightState {
         q_att.normalize();
     }
 
+    /**
+     * @brief Interpolate between two flight states for butter-smooth visual rendering.
+     * Uses SLERP on attitude quaternion and LERP on position and velocities.
+     * @param s0 Previous state (alpha = 0.0)
+     * @param s1 Current state (alpha = 1.0)
+     * @param alpha Sub-timestep progress in [0, 1]
+     */
+    [[nodiscard]] static FlightState interpolate(const FlightState& s0, const FlightState& s1, double alpha) noexcept {
+        alpha = std::clamp(alpha, 0.0, 1.0);
+        FlightState s;
+        s.pos_ned = s0.pos_ned + (s1.pos_ned - s0.pos_ned) * alpha;
+        s.vel_b   = s0.vel_b   + (s1.vel_b   - s0.vel_b)   * alpha;
+        s.omega_b = s0.omega_b + (s1.omega_b - s0.omega_b) * alpha;
+        s.q_att   = math::Quaternion::slerp(s0.q_att, s1.q_att, alpha);
+        return s;
+    }
+
     // Kinematic helper queries
     [[nodiscard]] constexpr double altitude() const noexcept {
         return -pos_ned.z;

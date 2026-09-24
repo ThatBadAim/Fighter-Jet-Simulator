@@ -22,8 +22,8 @@ void test_f16c_specifications() {
     std::cout << "[TEST] Validating F-16C Block 50 specifications...\n";
     const auto cfg = AircraftConfig::get(AircraftType::F16_FIGHTING_FALCON);
 
-    // Empty mass ~ 20,500 lbs
-    assert(std::abs(cfg.mass.empty_mass_kg - 9298.64) < 1.0);
+    // Empty mass 19,700 lbs (USAF fact sheet)
+    assert(std::abs(cfg.mass.empty_mass_kg - 8935.8) < 1.0);
     // Fuel capacity ~ 7,000 lbs
     assert(std::abs(cfg.mass.internal_fuel_capacity_kg - 3175.1) < 1.0);
     // Single F110 engine
@@ -38,13 +38,13 @@ void test_f16c_specifications() {
 
     // MassProperties factory test
     const auto mass = fdm::MassProperties::create(AircraftType::F16_FIGHTING_FALCON);
-    assert(std::abs(mass.mass_kg - 9298.64) < 1.0);
+    assert(std::abs(mass.mass_kg - 8935.8) < 1.0);
     assert(mass.Ixx > 10000.0 && mass.Ixx < 15000.0);
     assert(mass.Iyy > 70000.0 && mass.Iyy < 80000.0);
 
     // Fuel system scaling test
     const auto gross_mass = fdm::FuelSystem::compute(3175.1, AircraftType::F16_FIGHTING_FALCON);
-    assert(std::abs(gross_mass.mass_kg - (9298.64 + 3175.1)) < 1.0);
+    assert(std::abs(gross_mass.mass_kg - (8935.8 + 3175.1)) < 1.0);
     assert(gross_mass.Ixx > mass.Ixx); // Inertia scales with gross mass
     std::cout << "  -> F-16C specs passed.\n";
 }
@@ -132,7 +132,7 @@ void test_f22_specifications() {
     // Post-stall AoA capability
     assert(cfg.flcs.law_type == FLCSConfig::LawType::FBW_TVC_ALLOCATED);
     assert(cfg.flcs.alpha_limit_deg == 65.0);
-    assert(cfg.flcs.max_g_positive == 9.5);
+    assert(cfg.flcs.max_g_positive == 9.0);
     std::cout << "  -> F-22A Raptor specs passed.\n";
 }
 
@@ -140,9 +140,9 @@ void test_a10_specifications() {
     std::cout << "[TEST] Validating A-10C Thunderbolt II specifications...\n";
     const auto cfg = AircraftConfig::get(AircraftType::A10_THUNDERBOLT);
 
-    // 24,959 lb empty (~11,321 kg), 10,700 lb fuel (~4,853 kg)
+    // 24,959 lb empty (~11,321 kg), 11,000 lb fuel (~4,990 kg)
     assert(std::abs(cfg.mass.empty_mass_kg - 11321.0) < 1.0);
-    assert(std::abs(cfg.mass.internal_fuel_capacity_kg - 4853.0) < 1.0);
+    assert(std::abs(cfg.mass.internal_fuel_capacity_kg - 4990.0) < 1.0);
 
     // Twin TF34-GE-100A: 80.6 kN total dry, NO AFTERBURNER!
     assert(cfg.propulsion.engine_count == 2);

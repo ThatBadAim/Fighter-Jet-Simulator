@@ -166,6 +166,130 @@ void test_a10_subsonic_drag_barrier() {
               << c_sub.CD << ", CD at M0.8: " << c_trans.CD << ").\n";
 }
 
+void test_lift_continuous_through_transonic() {
+    std::cout << "[PERF] Testing lift stays continuous from M0.70 to M1.60 on every airframe...\n";
+    // The compressibility factor used to switch to a bounded Ackeret branch just
+    // past M1.05, multiplying lift by up to 2.84 and then dropping it back to 1.0
+    // at each airframe's mach_peak: 10-15 G spikes on anything flown near M1.1.
+    fdm::FlightState s{};
+    const double a = 3.0 * M_PI / 180.0;
+    s.vel_b = math::Vector3(300.0 * std::cos(a), 0.0, 300.0 * std::sin(a));
+    const aero::ControlSurfaces ctrl{};
+
+    for (AircraftType t : {AircraftType::F16_FIGHTING_FALCON, AircraftType::F15EX_EAGLE_II,
+                           AircraftType::EUROFIGHTER_TYPHOON, AircraftType::F22_RAPTOR,
+                           AircraftType::A10_THUNDERBOLT}) {
+        const aero::AircraftAeroModel aero(t);
+        double prev_cl = aero.compute_coefficients(s, ctrl, 20000.0, 0.70).CL;
+        double worst = 0.0;
+        for (double m = 0.705; m <= 1.60; m += 0.005) {
+            const double cl = aero.compute_coefficients(s, ctrl, 20000.0, m).CL;
+            worst = std::max(worst, std::abs(cl / prev_cl - 1.0));
+            prev_cl = cl;
+        }
+        std::cout << "  -> " << to_short_string(t) << " worst CL step per 0.005 Mach: "
+                  << worst * 100.0 << " %\n";
+        assert(worst < 0.03);
+    }
+
+    // The F-16 flies its own table-driven model, with its own factor.
+    double prev_pg = aero::F16AeroModel::prandtl_glauert(0.70);
+    double worst_pg = 0.0;
+    for (double m = 0.705; m <= 1.60; m += 0.005) {
+        const double pg = aero::F16AeroModel::prandtl_glauert(m);
+        worst_pg = std::max(worst_pg, std::abs(pg / prev_pg - 1.0));
+        prev_pg = pg;
+    }
+    std::cout << "  -> F-16C table model worst PG step per 0.005 Mach: " << worst_pg * 100.0 << " %\n";
+    assert(worst_pg < 0.03);
+}
+
+void test_a10_thrust_falls_with_mach() {
+    std::cout << "[PERF] Testing A-10C high-bypass TF34 thrust falls with Mach...\n";
+    // A positive ram term let the A-10 gain thrust with speed and run well past
+    // its 381 kt level-flight maximum.
+    propulsion::MultiEngine engine(AircraftType::A10_THUNDERBOLT);
+    const auto static_air = environment::Atmosphere1976::compute(0.0, 0.0);
+    const auto cruise_air = environment::Atmosphere1976::compute(0.0, 190.0); // ~M0.56
+    const double ratio = engine.lapse_factor(cruise_air, false) / engine.lapse_factor(static_air, false);
+    assert(ratio < 0.80 && ratio > 0.60);
+    std::cout << "  -> A-10C thrust at M0.56 is " << ratio * 100.0 << " % of static.\n";
+}
+
+void test_full_aft_stick_stays_in_alpha_envelope() {
+    std::cout << "[PERF] Testing sustained full aft stick at low speed stays inside the AoA envelope...\n";
+    struct Case { AircraftType type; double alt, speed, max_swing; };
+    // F-16: at full fuel the old limiter reacted on raw alpha and grew into a
+    // -8..34 deg pitch oscillation.  F-22: the thrust vectoring followed the raw
+    // stick against the limiter and tumbled the jet end over end.  Held at 60 deg
+    // post-stall the F-22 keeps a slow, bounded bob of several degrees.
+    constexpr Case cases[] = {{AircraftType::F16_FIGHTING_FALCON, 5000.0, 150.0, 6.0},
+                              {AircraftType::F16_FIGHTING_FALCON, 9000.0, 180.0, 6.0},
+                              {AircraftType::F22_RAPTOR,          5000.0, 130.0, 10.0}};
+    for (const Case& c : cases) {
+        FlightSimHarness sim(c.type);
+        sim.trim_level(c.alt, c.speed);
+        const double limit = AircraftConfig::get(c.type).flcs.alpha_limit_deg;
+        double max_alpha = -180.0, late_min = 180.0, late_max = -180.0;
+        const flcs::PilotCommands full_aft{1.0, 0.0, 0.0};
+        for (int i = 0; i < 2000; ++i) { // 10 s
+            sim.step(1.0, full_aft);
+            const double alpha = sim.state.alpha() * (180.0 / M_PI);
+            max_alpha = std::max(max_alpha, alpha);
+            if (i >= 1200) {
+                late_min = std::min(late_min, alpha);
+                late_max = std::max(late_max, alpha);
+            }
+        }
+        std::cout << "  -> " << to_short_string(c.type) << " at " << c.speed << " m/s: peak alpha "
+                  << max_alpha << " deg (limit " << limit << "), settled " << late_min << ".."
+                  << late_max << " deg\n";
+        assert(max_alpha < limit + 12.0);          // never tumbles through
+        assert(late_max < limit + 5.0);            // settles on the limit
+        assert(late_max - late_min < c.max_swing); // no growing oscillation
+    }
+}
+
+void test_full_stick_roll_reaches_profile_rate() {
+    std::cout << "[PERF] Testing full lateral stick reaches each FBW profile's roll rate...\n";
+    // Proportional-only roll loops settled 20-35% short (the F-22 managed 184 of
+    // its 280 deg/s); the integral trim closes the gap.
+    for (AircraftType t : {AircraftType::F15EX_EAGLE_II, AircraftType::EUROFIGHTER_TYPHOON,
+                           AircraftType::F22_RAPTOR}) {
+        FlightSimHarness sim(t);
+        sim.trim_level(5000.0, 230.0);
+        double p_max = 0.0;
+        for (int i = 0; i < 300; ++i) { // 1.5 s
+            sim.step(0.8, flcs::PilotCommands{0.0, 1.0, 0.0});
+            p_max = std::max(p_max, sim.state.omega_b.x * 180.0 / M_PI);
+        }
+        const double rated = AircraftConfig::get(t).flcs.max_roll_rate_dps;
+        std::cout << "  -> " << to_short_string(t) << ": " << p_max << " deg/s (rated " << rated << ")\n";
+        assert(p_max > 0.93 * rated && p_max < 1.10 * rated);
+    }
+}
+
+void test_a10_full_stick_is_lift_and_feel_limited() {
+    std::cout << "[PERF] Testing A-10C full aft stick: no deep stall at medium altitude, no 10+ G at Vne...\n";
+    // 22 deg of elevator per unit stick trimmed to ~77 deg alpha: full stick pulled
+    // 9-17 G at speed and deep-stalled everywhere else.
+    struct Case { double alt, speed; };
+    for (const Case c : {Case{1000.0, 220.0}, Case{5000.0, 150.0}}) {
+        FlightSimHarness sim(AircraftType::A10_THUNDERBOLT);
+        sim.trim_level(c.alt, c.speed);
+        double max_alpha = 0.0, max_nz = 0.0;
+        for (int i = 0; i < 1000; ++i) { // 5 s
+            sim.step(1.0, flcs::PilotCommands{1.0, 0.0, 0.0});
+            max_alpha = std::max(max_alpha, sim.state.alpha() * 180.0 / M_PI);
+            max_nz = std::max(max_nz, -sim.forces.force_b.z / (sim.mass.mass_kg * 9.80665));
+        }
+        std::cout << "  -> " << c.speed << " m/s at " << c.alt << " m: peak " << max_nz
+                  << " G, peak alpha " << max_alpha << " deg\n";
+        assert(max_nz < 8.5);     // can bend it a little past 7.33 G, not break it
+        assert(max_alpha < 22.0); // stall buffet, not a deep stall
+    }
+}
+
 } // namespace
 
 int main() {
@@ -178,6 +302,11 @@ int main() {
     test_f22_thrust_vectoring();
     test_a10_nacelle_pitch_coupling();
     test_a10_subsonic_drag_barrier();
+    test_lift_continuous_through_transonic();
+    test_a10_thrust_falls_with_mach();
+    test_full_aft_stick_stays_in_alpha_envelope();
+    test_full_stick_roll_reaches_profile_rate();
+    test_a10_full_stick_is_lift_and_feel_limited();
 
     std::cout << "\nAll aircraft flight performance tests successfully passed!\n";
     return 0;

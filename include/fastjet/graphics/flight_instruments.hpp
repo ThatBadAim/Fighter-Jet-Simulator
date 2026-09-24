@@ -1,7 +1,6 @@
 #pragma once
 
-#include "fastjet/graphics/gl_common.hpp"
-#include "fastjet/graphics/shader.hpp"
+#include "fastjet/graphics/instrument_canvas.hpp"
 #include "fastjet/graphics/cockpit_telemetry.hpp"
 #include "fastjet/aircraft/aircraft_type.hpp"
 #include "fastjet/fdm/flight_state.hpp"
@@ -13,270 +12,31 @@
 
 namespace fastjet::graphics {
 
-/// @brief 2D Vertex for instrument panel vector drawing
-struct InstVertex {
-    float pos[2];
-    float color[4];
-};
-
 /// @brief Cockpit dashboard flight instruments rendered to an off-screen FBO texture
-class FlightInstruments {
+class FlightInstruments : public InstrumentCanvas {
 public:
     static constexpr int TEX_WIDTH = 2048;
-    static constexpr int TEX_HEIGHT = 2048;
+    static constexpr int TEX_HEIGHT = 2048;  ///< With the centre display row
 
-private:
-    GLuint fbo_ = 0;
-    GLuint texture_ = 0;
-    GLuint rbo_ = 0;
-
-    GLuint vao_ = 0;
-    GLuint vbo_ = 0;
-    ShaderProgram shader_;
-    bool initialized_ = false;
-
-    std::vector<InstVertex> tri_verts_;
-    std::vector<InstVertex> line_verts_;
-
-    // Panel-local -> texture NDC transform. Each display on the instrument
-    // panel draws in its own -1..1 space; these map that space into the
-    // sub-rectangle of the shared atlas the display owns.
-    float vp_cx_ = 0.0f, vp_cy_ = 0.0f, vp_sx_ = 1.0f, vp_sy_ = 1.0f;
-
-    /// @brief Direct the following draw calls into one atlas cell.
-    /// @param cx,cy Cell centre in texture NDC
-    /// @param hw,hh Cell half-extents in texture NDC
-    void set_panel_viewport(float cx, float cy, float hw, float hh) noexcept {
-        vp_cx_ = cx; vp_cy_ = cy; vp_sx_ = hw; vp_sy_ = hh;
-    }
-
-    void reset_panel_viewport() noexcept {
-        vp_cx_ = 0.0f; vp_cy_ = 0.0f; vp_sx_ = 1.0f; vp_sy_ = 1.0f;
-    }
-
-    float mx(float x) const noexcept { return vp_cx_ + x * vp_sx_; }
-    float my(float y) const noexcept { return vp_cy_ + y * vp_sy_; }
-
-    void add_line(float x0, float y0, float x1, float y1, const Color4& col) {
-        line_verts_.push_back(InstVertex{{mx(x0), my(y0)}, {col.r, col.g, col.b, col.a}});
-        line_verts_.push_back(InstVertex{{mx(x1), my(y1)}, {col.r, col.g, col.b, col.a}});
-    }
-
-    void add_tri(float x0, float y0, float x1, float y1, float x2, float y2, const Color4& col) {
-        tri_verts_.push_back(InstVertex{{mx(x0), my(y0)}, {col.r, col.g, col.b, col.a}});
-        tri_verts_.push_back(InstVertex{{mx(x1), my(y1)}, {col.r, col.g, col.b, col.a}});
-        tri_verts_.push_back(InstVertex{{mx(x2), my(y2)}, {col.r, col.g, col.b, col.a}});
-    }
-
-    void add_quad(float x0, float y0, float x1, float y1, float x2, float y2, float x3, float y3, const Color4& col) {
-        add_tri(x0, y0, x1, y1, x2, y2, col);
-        add_tri(x0, y0, x2, y2, x3, y3, col);
-    }
-
-    void add_rect(float cx, float cy, float w, float h, const Color4& col) {
-        const float l = cx - w * 0.5f;
-        const float r = cx + w * 0.5f;
-        const float b = cy - h * 0.5f;
-        const float t = cy + h * 0.5f;
-        add_quad(l, b, r, b, r, t, l, t, col);
-    }
-
-    void add_circle(float cx, float cy, float r, const Color4& col, int segs = 24) {
-        for (int i = 0; i < segs; ++i) {
-            const float a0 = i * (2.0f * 3.14159265f / segs);
-            const float a1 = (i + 1) * (2.0f * 3.14159265f / segs);
-            add_tri(cx, cy, cx + r * std::cos(a0), cy + r * std::sin(a0),
-                    cx + r * std::cos(a1), cy + r * std::sin(a1), col);
-        }
-    }
-
-    void add_circle_outline(float cx, float cy, float r, const Color4& col, int segs = 24) {
-        for (int i = 0; i < segs; ++i) {
-            const float a0 = i * (2.0f * 3.14159265f / segs);
-            const float a1 = (i + 1) * (2.0f * 3.14159265f / segs);
-            add_line(cx + r * std::cos(a0), cy + r * std::sin(a0),
-                     cx + r * std::cos(a1), cy + r * std::sin(a1), col);
-        }
-    }
-
-    /// @brief 14-segment alphanumeric cell, as used on real MFD/UFC labels.
-    ///
-    /// Segment names follow the usual starburst convention: the four outer
-    /// bars (t/b, and the four half-height verticals), a split middle bar, two
-    /// diagonals per corner and a centre vertical. That is enough to draw the
-    /// full upper-case alphabet legibly at panel size, which the previous
-    /// 7-segment cell could not (it had no letters beyond 'M').
-    void draw_char(char c, float cx, float cy, float scale, const Color4& col) {
-        const float w = 0.6f * scale;
-        const float h = 1.0f * scale;
-        const float l = cx - w * 0.5f;
-        const float r = cx + w * 0.5f;
-        const float b = cy - h * 0.5f;
-        const float m = cy;
-        const float t = cy + h * 0.5f;
-
-        auto seg_t  = [&]() { add_line(l, t, r, t, col); };   // top bar
-        auto seg_tr = [&]() { add_line(r, m, r, t, col); };   // upper right
-        auto seg_br = [&]() { add_line(r, b, r, m, col); };   // lower right
-        auto seg_b  = [&]() { add_line(l, b, r, b, col); };   // bottom bar
-        auto seg_bl = [&]() { add_line(l, b, l, m, col); };   // lower left
-        auto seg_tl = [&]() { add_line(l, m, l, t, col); };   // upper left
-        auto seg_ml = [&]() { add_line(l, m, cx, m, col); };  // middle left
-        auto seg_mr = [&]() { add_line(cx, m, r, m, col); };  // middle right
-        auto seg_m  = [&]() { seg_ml(); seg_mr(); };
-        auto seg_cv_t = [&]() { add_line(cx, m, cx, t, col); };  // centre vert upper
-        auto seg_cv_b = [&]() { add_line(cx, b, cx, m, col); };  // centre vert lower
-        auto seg_d_tl = [&]() { add_line(l, t, cx, m, col); };   // diagonal \ upper-left
-        auto seg_d_tr = [&]() { add_line(r, t, cx, m, col); };   // diagonal / upper-right
-        auto seg_d_bl = [&]() { add_line(l, b, cx, m, col); };   // diagonal / lower-left
-        auto seg_d_br = [&]() { add_line(r, b, cx, m, col); };   // diagonal \ lower-right
-
-        switch (c) {
-            // ---- digits ----
-            case '0': seg_t(); seg_tr(); seg_br(); seg_b(); seg_bl(); seg_tl(); break;
-            case '1': seg_tr(); seg_br(); break;
-            case '2': seg_t(); seg_tr(); seg_m(); seg_bl(); seg_b(); break;
-            case '3': seg_t(); seg_tr(); seg_m(); seg_br(); seg_b(); break;
-            case '4': seg_tl(); seg_m(); seg_tr(); seg_br(); break;
-            case '5': seg_t(); seg_tl(); seg_m(); seg_br(); seg_b(); break;
-            case '6': seg_t(); seg_tl(); seg_m(); seg_bl(); seg_br(); seg_b(); break;
-            case '7': seg_t(); seg_tr(); seg_br(); break;
-            case '8': seg_t(); seg_tr(); seg_br(); seg_b(); seg_bl(); seg_tl(); seg_m(); break;
-            case '9': seg_t(); seg_tl(); seg_tr(); seg_m(); seg_br(); seg_b(); break;
-
-            // ---- letters ----
-            case 'A': seg_t(); seg_tl(); seg_tr(); seg_m(); seg_bl(); seg_br(); break;
-            case 'B': seg_t(); seg_tr(); seg_br(); seg_b(); seg_mr(); seg_cv_t(); seg_cv_b(); break;
-            case 'C': seg_t(); seg_tl(); seg_bl(); seg_b(); break;
-            case 'D': seg_t(); seg_tr(); seg_br(); seg_b(); seg_cv_t(); seg_cv_b(); break;
-            case 'E': seg_t(); seg_tl(); seg_ml(); seg_bl(); seg_b(); break;
-            case 'F': seg_t(); seg_tl(); seg_ml(); seg_bl(); break;
-            case 'G': seg_t(); seg_tl(); seg_bl(); seg_b(); seg_br(); seg_mr(); break;
-            case 'H': seg_tl(); seg_bl(); seg_m(); seg_tr(); seg_br(); break;
-            case 'I': seg_t(); seg_b(); seg_cv_t(); seg_cv_b(); break;
-            case 'J': seg_tr(); seg_br(); seg_b(); seg_bl(); break;
-            case 'K': seg_tl(); seg_bl(); seg_ml(); seg_d_tr(); seg_d_br(); break;
-            case 'L': seg_tl(); seg_bl(); seg_b(); break;
-            case 'M': seg_tl(); seg_bl(); seg_d_tl(); seg_d_tr(); seg_tr(); seg_br(); break;
-            case 'N': seg_tl(); seg_bl(); seg_d_tl(); seg_d_br(); seg_tr(); seg_br(); break;
-            case 'O': seg_t(); seg_tr(); seg_br(); seg_b(); seg_bl(); seg_tl(); break;
-            case 'P': seg_t(); seg_tl(); seg_tr(); seg_m(); seg_bl(); break;
-            case 'Q': seg_t(); seg_tr(); seg_br(); seg_b(); seg_bl(); seg_tl(); seg_d_br(); break;
-            case 'R': seg_t(); seg_tl(); seg_tr(); seg_m(); seg_bl(); seg_d_br(); break;
-            case 'S': seg_t(); seg_tl(); seg_m(); seg_br(); seg_b(); break;
-            case 'T': seg_t(); seg_cv_t(); seg_cv_b(); break;
-            case 'U': seg_tl(); seg_bl(); seg_b(); seg_br(); seg_tr(); break;
-            case 'V': seg_tl(); seg_bl(); seg_d_bl(); seg_d_tr(); break;
-            case 'W': seg_tl(); seg_bl(); seg_d_bl(); seg_d_br(); seg_tr(); seg_br(); break;
-            case 'X': seg_d_tl(); seg_d_tr(); seg_d_bl(); seg_d_br(); break;
-            case 'Y': seg_d_tl(); seg_d_tr(); seg_cv_b(); break;
-            case 'Z': seg_t(); seg_d_tr(); seg_d_bl(); seg_b(); break;
-
-            // ---- punctuation ----
-            case '.': add_line(cx - 0.05f * scale, b, cx + 0.05f * scale, b, col); break;
-            case '-': seg_m(); break;
-            case '/': add_line(l, b, r, t, col); break;
-            case ':': add_line(cx - 0.04f * scale, m + 0.18f * scale, cx + 0.04f * scale, m + 0.18f * scale, col);
-                      add_line(cx - 0.04f * scale, m - 0.18f * scale, cx + 0.04f * scale, m - 0.18f * scale, col); break;
-            case '+': add_line(cx, m - 0.22f * scale, cx, m + 0.22f * scale, col); seg_m(); break;
-            case ' ': break;
-            default: break;
-        }
-    }
-
-    void draw_string(const char* str, float start_x, float y, float scale, const Color4& col) {
-        float x = start_x;
-        const float spacing = scale * 0.85f;
-        while (*str) {
-            draw_char(*str, x, y, scale, col);
-            x += spacing;
-            ++str;
-        }
-    }
-
-public:
     FlightInstruments() = default;
 
     ~FlightInstruments() {
         destroy();
     }
 
-    bool init() {
-        if (initialized_) return true;
-
-        // 1. Create Framebuffer and Texture
-        glGenFramebuffers(1, &fbo_);
-        glBindFramebuffer(GL_FRAMEBUFFER, fbo_);
-
-        glGenTextures(1, &texture_);
-        glBindTexture(GL_TEXTURE_2D, texture_);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, TEX_WIDTH, TEX_HEIGHT, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture_, 0);
-
-        glGenRenderbuffers(1, &rbo_);
-        glBindRenderbuffer(GL_RENDERBUFFER, rbo_);
-        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, TEX_WIDTH, TEX_HEIGHT);
-        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, rbo_);
-
-        if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
-            std::cerr << "[FlightInstruments Error] FBO incomplete!\n";
-            glBindFramebuffer(GL_FRAMEBUFFER, 0);
-            return false;
-        }
-        glBindFramebuffer(GL_FRAMEBUFFER, 0);
-
-        // 2. Shaders for 2D UI geometry
-        const char* vert_src = R"(
-            #version 330 core
-            layout (location = 0) in vec2 aPos;
-            layout (location = 1) in vec4 aColor;
-            out vec4 vColor;
-            void main() {
-                vColor = aColor;
-                gl_Position = vec4(aPos, 0.0, 1.0);
-            }
-        )";
-
-        const char* frag_src = R"(
-            #version 330 core
-            in vec4 vColor;
-            out vec4 FragColor;
-            void main() {
-                FragColor = vColor;
-            }
-        )";
-
-        if (!shader_.init_from_source(vert_src, frag_src)) {
-            return false;
-        }
-
-        glGenVertexArrays(1, &vao_);
-        glGenBuffers(1, &vbo_);
-
-        glBindVertexArray(vao_);
-        glBindBuffer(GL_ARRAY_BUFFER, vbo_);
-        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(InstVertex), (void*)offsetof(InstVertex, pos));
-        glEnableVertexAttribArray(0);
-        glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, sizeof(InstVertex), (void*)offsetof(InstVertex, color));
-        glEnableVertexAttribArray(1);
-        glBindVertexArray(0);
-
-        initialized_ = true;
-        return true;
+    /// @param centre_page Also draw the centre display. Without it the atlas
+    /// holds only the MFD row, at half the height: the same pixels per
+    /// display, with half the clearing and mipmapping each frame.
+    bool init(bool centre_page = true) {
+        centre_page_ = centre_page;
+        return init_canvas(TEX_WIDTH, centre_page ? TEX_HEIGHT : TEX_HEIGHT / 2);
     }
 
+    /// @brief Atlas V range of the MFD row (the two MFD pages).
+    [[nodiscard]] float mfd_row_v0() const noexcept { return centre_page_ ? 0.5f : 0.0f; }
+
     void destroy() noexcept {
-        if (fbo_) { glDeleteFramebuffers(1, &fbo_); fbo_ = 0; }
-        if (texture_) { glDeleteTextures(1, &texture_); texture_ = 0; }
-        if (rbo_) { glDeleteRenderbuffers(1, &rbo_); rbo_ = 0; }
-        if (vao_) { glDeleteVertexArrays(1, &vao_); vao_ = 0; }
-        if (vbo_) { glDeleteBuffers(1, &vbo_); vbo_ = 0; }
-        shader_.destroy();
-        initialized_ = false;
+        destroy_canvas();
     }
 
     /// @brief Left MFD page: AoA indexer, ADI ball, Mach tape, plus Landing Gear & Surface status panel
@@ -469,6 +229,15 @@ public:
             if (tel.is_crashed) {
                 add_rect(bx, py - 0.10f, 0.48f, 0.08f, Color4::red());
                 draw_string("IMPACT / CRASH", bx - 0.22f, py - 0.10f, 0.055f, Color4::white());
+            } else if (tel.ofc_tumble_active) {
+                add_rect(bx, py - 0.10f, 0.48f, 0.08f, Color4::amber());
+                draw_string("ANTI-SPIN RECOVER", bx - 0.23f, py - 0.10f, 0.048f, Color4::black());
+            } else if (tel.ofc_gcas_active) {
+                add_rect(bx, py - 0.10f, 0.48f, 0.08f, Color4::amber());
+                draw_string("AUTO-GCAS PULL", bx - 0.22f, py - 0.10f, 0.050f, Color4::black());
+            } else if (tel.ofc_gloc_active) {
+                add_rect(bx, py - 0.10f, 0.48f, 0.08f, Color4::amber());
+                draw_string("GLOC AUTO-REC", bx - 0.22f, py - 0.10f, 0.050f, Color4::black());
             } else if (tel.over_g_alert) {
                 add_rect(bx, py - 0.10f, 0.48f, 0.08f, Color4::amber());
                 draw_string("OVER-G WARNING", bx - 0.22f, py - 0.10f, 0.055f, Color4::black());
@@ -703,95 +472,28 @@ public:
     void update_and_render(const fdm::FlightState& state, const AvionicsTelemetry& telemetry = AvionicsTelemetry{}) {
         if (!initialized_) return;
 
-        tri_verts_.clear();
-        line_verts_.clear();
+        begin_canvas();
 
-        set_panel_viewport(-0.5f, 0.5f, 0.5f, 0.5f);
+        // The MFD row fills the top half of the full atlas, or all of the
+        // half-height one.
+        const float row_cy = centre_page_ ? 0.5f : 0.0f;
+        const float row_hh = centre_page_ ? 0.5f : 1.0f;
+        set_panel_viewport(-0.5f, row_cy, 0.5f, row_hh);
         draw_left_mfd(state, telemetry);
 
-        set_panel_viewport(0.5f, 0.5f, 0.5f, 0.5f);
+        set_panel_viewport(0.5f, row_cy, 0.5f, row_hh);
         draw_right_mfd(state, telemetry);
 
-        set_panel_viewport(0.0f, -0.5f, 0.5f, 0.5f);
-        draw_center_cpd(state, telemetry);
-
-        reset_panel_viewport();
-
-        // =========================================================================
-        // Render pass to FBO
-        // =========================================================================
-        GLint prev_fbo = 0;
-        glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prev_fbo);
-        GLint prev_viewport[4];
-        glGetIntegerv(GL_VIEWPORT, prev_viewport);
-
-        glBindFramebuffer(GL_FRAMEBUFFER, fbo_);
-        glViewport(0, 0, TEX_WIDTH, TEX_HEIGHT);
-        glClearColor(0.04f, 0.05f, 0.06f, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
-        // This is flat 2D geometry drawn in painter's order, and it runs in the
-        // middle of a frame whose depth, stencil and blend state belong to the
-        // 3D passes. Without neutralising that state here, the panel pages draw
-        // correctly on the first frame and then vanish once the cockpit passes
-        // have left their own depth and stencil settings behind.
-        const GLboolean had_depth   = glIsEnabled(GL_DEPTH_TEST);
-        const GLboolean had_stencil = glIsEnabled(GL_STENCIL_TEST);
-        const GLboolean had_blend   = glIsEnabled(GL_BLEND);
-        const GLboolean had_cull    = glIsEnabled(GL_CULL_FACE);
-        glDisable(GL_DEPTH_TEST);
-        glDisable(GL_STENCIL_TEST);
-        glDisable(GL_BLEND);
-        glDisable(GL_CULL_FACE);
-
-        shader_.use();
-        glBindVertexArray(vao_);
-
-        // 1. Draw solid filled triangles
-        if (!tri_verts_.empty()) {
-            glBindBuffer(GL_ARRAY_BUFFER, vbo_);
-            glBufferData(GL_ARRAY_BUFFER, tri_verts_.size() * sizeof(InstVertex), tri_verts_.data(), GL_DYNAMIC_DRAW);
-            glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(tri_verts_.size()));
+        if (centre_page_) {
+            set_panel_viewport(0.0f, -0.5f, 0.5f, 0.5f);
+            draw_center_cpd(state, telemetry);
         }
 
-        // 2. Draw crisp wireframe lines / text
-        if (!line_verts_.empty()) {
-            glLineWidth(3.0f);
-            glBindBuffer(GL_ARRAY_BUFFER, vbo_);
-            glBufferData(GL_ARRAY_BUFFER, line_verts_.size() * sizeof(InstVertex), line_verts_.data(), GL_DYNAMIC_DRAW);
-            glDrawArrays(GL_LINES, 0, static_cast<GLsizei>(line_verts_.size()));
-            glLineWidth(1.0f);
-        }
-
-        glBindVertexArray(0);
-
-        // Restore previous framebuffer and viewport before touching the texture.
-        // Mipmaps must be generated with the texture NOT attached to the bound
-        // framebuffer: generating them while it is still this FBO's colour
-        // attachment is undefined, and in practice leaves the whole chain
-        // black, so the panel displays render as dead glass.
-        // Hand the caller's state back exactly as it was found.
-        if (had_depth)   glEnable(GL_DEPTH_TEST);
-        if (had_stencil) glEnable(GL_STENCIL_TEST);
-        if (had_blend)   glEnable(GL_BLEND);
-        if (had_cull)    glEnable(GL_CULL_FACE);
-
-        glBindFramebuffer(GL_FRAMEBUFFER, prev_fbo);
-        glViewport(prev_viewport[0], prev_viewport[1], prev_viewport[2], prev_viewport[3]);
-
-        // Generate mipmaps for smooth anti-aliased minification on the 3D dashboard
-        glBindTexture(GL_TEXTURE_2D, texture_);
-        glGenerateMipmap(GL_TEXTURE_2D);
-    }
-    /// @brief Bind the instrument texture to an active texture unit
-    void bind_texture(GLenum unit = GL_TEXTURE0) const noexcept {
-        glActiveTexture(unit);
-        glBindTexture(GL_TEXTURE_2D, texture_);
+        render_canvas(Color4{0.04f, 0.05f, 0.06f, 1.0f});
     }
 
-    GLuint texture_id() const noexcept { return texture_; }
-    GLuint fbo_id() const noexcept { return fbo_; }
-    bool is_initialized() const noexcept { return initialized_; }
+private:
+    bool centre_page_ = true;
 };
 
 } // namespace fastjet::graphics

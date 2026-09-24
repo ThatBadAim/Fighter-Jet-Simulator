@@ -261,6 +261,34 @@ struct alignas(16) Mat4 {
     }
 };
 
+/// @brief Largest anisotropic filtering level the driver offers (0 = none).
+///
+/// Checked through the extension list rather than by trying the parameter,
+/// which would leave a GL error behind on drivers without it.
+[[nodiscard]] inline float max_texture_anisotropy() {
+    GLint count = 0;
+    glGetIntegerv(GL_NUM_EXTENSIONS, &count);
+    for (GLint i = 0; i < count; ++i) {
+        const auto* ext = reinterpret_cast<const char*>(glGetStringi(GL_EXTENSIONS, static_cast<GLuint>(i)));
+        if (!ext) continue;
+        if (std::strcmp(ext, "GL_EXT_texture_filter_anisotropic") == 0 ||
+            std::strcmp(ext, "GL_ARB_texture_filter_anisotropic") == 0) {
+            GLfloat v = 0.0f;
+            glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, &v);
+            return v;
+        }
+    }
+    return 0.0f;
+}
+
+/// @brief Applies up to `level` anisotropic filtering to the bound 2D texture.
+inline void apply_texture_anisotropy(float level) {
+    const float max_level = max_texture_anisotropy();
+    if (max_level > 1.0f) {
+        glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, level < max_level ? level : max_level);
+    }
+}
+
 /// @brief RGBA Color
 struct Color4 {
     float r = 1.0f;

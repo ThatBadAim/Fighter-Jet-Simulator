@@ -26,6 +26,7 @@ public:
     static constexpr double NZ_MIN         = -3.0;   // Minimum normal acceleration [G]
     static constexpr double ALPHA_MAX_DEG  = 25.5;   // Maximum allowable angle of attack [deg]
     static constexpr double Q_CMD_MAX_DPS  = 25.0;   // Maximum pitch rate command [deg/s]
+    static constexpr double ALPHA_LEAD_S   = 0.10;   // AoA limiter prediction horizon [s]
 
     // Tuned gains for 200 Hz digital loop
     double Kp{1.40};            // Proportional gain [deg elevator / G error]
@@ -77,21 +78,32 @@ public:
         const double w_Nz = std::clamp((imu.q_bar - 2000.0) / 6000.0, 0.0, 1.0);
 
         // 4. Hard Angle of Attack (AoA) Limiter Command Restriction
-        // As alpha exceeds 18 deg and approaches 25.5 deg, override pilot command
+        // As alpha exceeds 18 deg and approaches 25.5 deg, override pilot command.
+        // Every tier acts on alpha *predicted* ALPHA_LEAD_S ahead.  On raw alpha the
+        // limiter only reacted once the nose was already through the limit, and its
+        // hard push-down then threw alpha back to single figures while the pilot
+        // still held full aft stick: at low q (heavy jet, 150 m/s at 5 km) that grew
+        // into a divergent -8..34 deg pitch oscillation.  The rate used is alpha's,
+        // i.e. pitch rate less the flight-path turn rate the current Nz accounts
+        // for — a sustained pull's steady pitch rate is not alpha rising.
+        constexpr double G0 = 9.80665;
+        const double path_rate_dps = (180.0 / M_PI) * G0 * (imu.Nz - 1.0)
+                                   / std::max(imu.airspeed, 50.0);
+        const double alpha_lim = imu.alpha_deg + ALPHA_LEAD_S * (imu.q_deg - path_rate_dps);
         double aoa_override_de = 0.0;
-        if (imu.alpha_deg > 18.0) {
-            const double alpha_headroom = std::max(0.0, ALPHA_MAX_DEG - imu.alpha_deg);
+        if (alpha_lim > 18.0) {
+            const double alpha_headroom = std::max(0.0, ALPHA_MAX_DEG - alpha_lim);
             const double max_allowed_G = 1.0 + (alpha_headroom / 7.5) * (NZ_MAX - 1.0) - K_alpha_rate * std::max(0.0, imu.q_deg);
             Nz_cmd = std::min(Nz_cmd, max_allowed_G);
             q_cmd  = std::min(q_cmd,  (alpha_headroom / 7.5) * Q_CMD_MAX_DPS);
 
-            if (imu.alpha_deg > 22.0) {
-                const double excess = imu.alpha_deg - 22.0;
+            if (alpha_lim > 22.0) {
+                const double excess = alpha_lim - 22.0;
                 aoa_override_de = K_alpha * excess + 0.15 * std::max(0.0, imu.q_deg);
             }
-            if (imu.alpha_deg >= 25.0) {
+            if (alpha_lim >= 25.0) {
                 // Hard ceiling push-down
-                aoa_override_de += (imu.alpha_deg - 25.0) * 15.0;
+                aoa_override_de += (alpha_lim - 25.0) * 15.0;
                 Nz_cmd = std::min(Nz_cmd, 0.5);
                 q_cmd = std::min(q_cmd, -2.0);
             }

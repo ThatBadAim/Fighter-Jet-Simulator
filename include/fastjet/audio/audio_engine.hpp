@@ -36,6 +36,12 @@ struct AudioSample {
 ///
 /// NOTE: If sound files are not installed in assets/sounds/, the engine remains
 /// completely silent with zero CPU overhead (no harsh procedural buzz or chiptune beeps).
+///
+/// Threading: mixing runs on SDL's audio thread, in the stream's get
+/// callback, so playback never depends on the frame rate: a long frame
+/// (loading, a dragged window) cannot starve the device and crackle. The
+/// main thread only sets playback parameters, holding the stream lock that
+/// SDL also holds around the callback.
 class AudioEngine {
 public:
     static constexpr int SAMPLE_RATE = 44100;
@@ -56,6 +62,14 @@ private:
     AudioSample sfx_over_g_;       // Over-G aural warning
     AudioSample sfx_stall_;        // Stall warning horn
     AudioSample sfx_pullup_;       // Betty "Pull Up" alert
+
+    // Mix bus gains: continuous engine/airflow loops vs. alerts and one-shots
+    float engine_bus_gain_ = 1.0f;
+    float alerts_bus_gain_ = 1.0f;
+
+    // Mix buffer for the audio thread, allocated once at init.
+    std::vector<float> mix_buffer_;
+    static constexpr int kMixChunkFrames = 1024;
 
     // State transition tracking
     bool prev_on_ground_     = false;
@@ -103,9 +117,8 @@ public:
             return false;
         }
 
-        SDL_ResumeAudioDevice(device_id_);
-
-        // Load authentic audio samples from disk if present
+        // Load authentic audio samples from disk if present. Done before the
+        // mixer starts, so the audio thread never sees a half-loaded sample.
         load_sample("assets/sounds/engine_spool.wav", sfx_spool_, true);
         load_sample("assets/sounds/afterburner.wav", sfx_afterburner_, true);
         load_sample("assets/sounds/wind_rush.wav", sfx_wind_, true);
@@ -130,7 +143,13 @@ public:
             std::cout << "[AUDIO] No .wav audio samples in assets/sounds/ - Audio muted cleanly.\n";
         }
 
+        mix_buffer_.assign(static_cast<size_t>(kMixChunkFrames) * CHANNELS, 0.0f);
         initialized_ = true;
+        if (loaded_count > 0) {
+            // Silent builds never start the mixer: zero audio-thread work.
+            SDL_SetAudioStreamGetCallback(stream_, &AudioEngine::feed, this);
+        }
+        SDL_ResumeAudioDevice(device_id_);
         return true;
     }
 
@@ -147,7 +166,16 @@ public:
     }
 
     void set_enabled(bool enabled) noexcept {
+        StreamLock lock(stream_);
         enabled_ = enabled;
+    }
+
+    /// @brief Final linear gains per mix bus (master volume and mute already
+    /// folded in by the caller). Takes effect on the next mixed chunk.
+    void set_bus_gains(float engine_bus, float alerts_bus) noexcept {
+        StreamLock lock(stream_);
+        engine_bus_gain_ = std::clamp(engine_bus, 0.0f, 1.0f);
+        alerts_bus_gain_ = std::clamp(alerts_bus, 0.0f, 1.0f);
     }
 
     bool is_initialized() const noexcept { return initialized_; }
@@ -168,28 +196,38 @@ public:
             return;
         }
 
-        // 1. Spool sample parameters
-        if (sfx_spool_.loaded) {
-            sfx_spool_.is_playing = true;
-            const double rpm_norm = std::clamp((tel.engine_rpm_pct - 60.0) / 40.0, 0.0, 1.0);
-            sfx_spool_.current_rate = static_cast<float>(0.75 + 0.50 * rpm_norm); // Pitch tracks RPM
-            sfx_spool_.current_gain = static_cast<float>(0.30 + 0.45 * rpm_norm); // Volume tracks RPM
-        }
+        // The audio thread reads these parameters while mixing.
+        StreamLock lock(stream_);
 
-        // 2. Afterburner sample parameters
-        if (sfx_afterburner_.loaded) {
-            const double ab_frac = std::clamp((tel.throttle_input - 0.85) / 0.15, 0.0, 1.0);
-            sfx_afterburner_.is_playing = (ab_frac > 0.01);
-            sfx_afterburner_.current_gain = static_cast<float>(ab_frac * 0.75);
-            sfx_afterburner_.current_rate = 1.0f;
-        }
+        // If aircraft is crashed, silence propulsion and aerodynamic rush loops
+        if (tel.is_crashed) {
+            sfx_spool_.is_playing = false;
+            sfx_afterburner_.is_playing = false;
+            sfx_wind_.is_playing = false;
+        } else {
+            // 1. Spool sample parameters
+            if (sfx_spool_.loaded) {
+                sfx_spool_.is_playing = true;
+                const double rpm_norm = std::clamp((tel.engine_rpm_pct - 60.0) / 40.0, 0.0, 1.0);
+                sfx_spool_.current_rate = static_cast<float>(0.75 + 0.50 * rpm_norm); // Pitch tracks RPM
+                sfx_spool_.current_gain = static_cast<float>(0.30 + 0.45 * rpm_norm); // Volume tracks RPM
+            }
 
-        // 3. Canopy aerodynamic wind rush sample parameters
-        if (sfx_wind_.loaded) {
-            const double q_norm = std::clamp(dynamic_pressure / 60000.0, 0.0, 1.0);
-            sfx_wind_.is_playing = (q_norm > 0.02);
-            sfx_wind_.current_gain = static_cast<float>(q_norm * q_norm * 0.60);
-            sfx_wind_.current_rate = static_cast<float>(0.85 + 0.35 * q_norm);
+            // 2. Afterburner sample parameters
+            if (sfx_afterburner_.loaded) {
+                const double ab_frac = std::clamp((tel.throttle_input - 0.85) / 0.15, 0.0, 1.0);
+                sfx_afterburner_.is_playing = (ab_frac > 0.01);
+                sfx_afterburner_.current_gain = static_cast<float>(ab_frac * 0.75);
+                sfx_afterburner_.current_rate = 1.0f;
+            }
+
+            // 3. Canopy aerodynamic wind rush sample parameters
+            if (sfx_wind_.loaded) {
+                const double q_norm = std::clamp(dynamic_pressure / 60000.0, 0.0, 1.0);
+                sfx_wind_.is_playing = (q_norm > 0.02);
+                sfx_wind_.current_gain = static_cast<float>(q_norm * q_norm * 0.60);
+                sfx_wind_.current_rate = static_cast<float>(0.85 + 0.35 * q_norm);
+            }
         }
 
         // 4. One-shot transitions
@@ -216,21 +254,34 @@ public:
             play_one_shot(sfx_stall_, 0.75f);
         }
         prev_stall_ = tel.high_aoa_alert;
-
-        // Keep 40-80ms of audio queued in the stream
-        constexpr int MIN_QUEUE_BYTES = static_cast<int>(SAMPLE_RATE * CHANNELS * sizeof(float) * 0.04);
-        constexpr int CHUNK_SAMPLES   = 1024;
-
-        int queued = SDL_GetAudioStreamQueued(stream_);
-        while (queued < MIN_QUEUE_BYTES) {
-            std::vector<float> buffer(CHUNK_SAMPLES * CHANNELS, 0.0f);
-            mix_samples(buffer.data(), CHUNK_SAMPLES);
-            SDL_PutAudioStreamData(stream_, buffer.data(), static_cast<int>(buffer.size() * sizeof(float)));
-            queued = SDL_GetAudioStreamQueued(stream_);
-        }
     }
 
 private:
+    /// Scoped SDL stream lock (no-op without a stream).
+    struct StreamLock {
+        SDL_AudioStream* s;
+        explicit StreamLock(SDL_AudioStream* stream) : s(stream) { if (s) SDL_LockAudioStream(s); }
+        ~StreamLock() { if (s) SDL_UnlockAudioStream(s); }
+        StreamLock(const StreamLock&) = delete;
+        StreamLock& operator=(const StreamLock&) = delete;
+    };
+
+    /// Audio-thread callback: the device wants `additional` more bytes.
+    /// SDL holds the stream lock for the duration.
+    static void SDLCALL feed(void* userdata, SDL_AudioStream* stream, int additional, int /*total*/) {
+        auto* self = static_cast<AudioEngine*>(userdata);
+        constexpr int kFrameBytes = CHANNELS * static_cast<int>(sizeof(float));
+        int frames = (additional + kFrameBytes - 1) / kFrameBytes;
+        while (frames > 0) {
+            const int n = std::min(frames, kMixChunkFrames);
+            float* buf = self->mix_buffer_.data();
+            std::fill(buf, buf + static_cast<size_t>(n) * CHANNELS, 0.0f);
+            if (self->enabled_) self->mix_samples(buf, n);
+            SDL_PutAudioStreamData(stream, buf, n * kFrameBytes);
+            frames -= n;
+        }
+    }
+
     void play_one_shot(AudioSample& s, float gain) noexcept {
         if (!s.loaded) return;
         s.playhead = 0.0;
@@ -241,18 +292,21 @@ private:
 
     /// @brief Mix active audio sample channels into output buffer with linear interpolation
     void mix_samples(float* out, int num_samples) noexcept {
-        AudioSample* channels[] = {
-            &sfx_spool_, &sfx_afterburner_, &sfx_wind_,
-            &sfx_touchdown_, &sfx_gear_, &sfx_over_g_, &sfx_stall_, &sfx_pullup_
+        struct Channel { AudioSample* sample; float bus_gain; };
+        const Channel channels[] = {
+            {&sfx_spool_, engine_bus_gain_}, {&sfx_afterburner_, engine_bus_gain_}, {&sfx_wind_, engine_bus_gain_},
+            {&sfx_touchdown_, alerts_bus_gain_}, {&sfx_gear_, alerts_bus_gain_}, {&sfx_over_g_, alerts_bus_gain_},
+            {&sfx_stall_, alerts_bus_gain_}, {&sfx_pullup_, alerts_bus_gain_}
         };
 
-        for (AudioSample* s : channels) {
+        for (const Channel& ch : channels) {
+            AudioSample* s = ch.sample;
             if (!s->loaded || !s->is_playing || s->pcm.empty()) continue;
 
             const size_t total_frames = s->frame_count();
             if (total_frames < 2) continue;
 
-            const float gain = s->current_gain;
+            const float gain = s->current_gain * ch.bus_gain;
             const double rate = s->current_rate;
 
             for (int i = 0; i < num_samples; ++i) {

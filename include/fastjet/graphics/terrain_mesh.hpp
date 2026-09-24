@@ -1,5 +1,6 @@
 #pragma once
 
+#include "fastjet/core/thread_pool.hpp"
 #include "fastjet/graphics/gl_common.hpp"
 #include "fastjet/graphics/terrain_field.hpp"
 #include <cmath>
@@ -49,12 +50,13 @@ private:
     // Ring 0 is a solid patch; the rest are hollow frames around it. Spacing
     // roughly doubles each step, so screen-space triangle size stays even.
     static constexpr Ring RINGS[] = {
-        {  4000.0f,   125.0f },
-        { 12000.0f,   400.0f },
-        { 34000.0f,  1100.0f },
-        { 90000.0f,  3200.0f },
+        {  4500.0f,    50.0f }, // Basin & immediate airfield vicinity (high fidelity)
+        { 14000.0f,   150.0f }, // Near mountain foothills & ridges
+        { 36000.0f,   400.0f }, // Mid mountain ranges
+        { 65000.0f,  1000.0f }, // Outer mountain chains
+        { 95000.0f,  2500.0f }, // Horizon silhouettes
     };
-    static constexpr int RING_COUNT = 4;
+    static constexpr int RING_COUNT = 5;
 
     static void push_vertex(std::vector<float>& v, float x, float y) {
         const float h = TerrainField::height(x, y);
@@ -62,7 +64,7 @@ private:
         // Differentiate over a span tied to feature size, not cell size: this
         // keeps lighting continuous across the LOD ring seams, where cell size
         // jumps by 3x and per-cell normals would visibly crease.
-        TerrainField::normal_ned(x, y, 60.0f, nx, ny, nz);
+        TerrainField::normal_ned(x, y, 35.0f, nx, ny, nz);
 
         v.push_back(x);
         v.push_back(y);
@@ -92,9 +94,8 @@ private:
 
     void build() {
         std::vector<float> verts;
-        // Sized for the ring table above (~81k vertices x 7 floats). Reserved
-        // once at init so the build does no incremental reallocation.
-        verts.reserve(600'000);
+        // Sized for the high-density ring table (~70k-85k cells x 6 verts x 7 floats).
+        verts.reserve(800'000);
 
         const float cx = TerrainField::FIELD_CENTER_X;
 
@@ -109,7 +110,12 @@ private:
             const float lo_y = -span * 0.5f;
 
             const int n = static_cast<int>(span / cell);
-            for (int i = 0; i < n; ++i) {
+            // Rows are sampled across the thread pool, each into its own
+            // buffer, then joined in row order: the mesh is identical to a
+            // serial build.
+            std::vector<std::vector<float>> rows(static_cast<size_t>(n));
+            core::ThreadPool::shared().parallel_for(0, n, [&](int i) {
+                std::vector<float>& row = rows[static_cast<size_t>(i)];
                 const float x0 = lo_x + static_cast<float>(i) * cell;
                 const float x1 = x0 + cell;
                 for (int j = 0; j < n; ++j) {
@@ -124,9 +130,10 @@ private:
 
                     if (in_airfield(x0, y0, x1, y1)) continue;
 
-                    push_quad(verts, x0, y0, x1, y1);
+                    push_quad(row, x0, y0, x1, y1);
                 }
-            }
+            });
+            for (const auto& row : rows) verts.insert(verts.end(), row.begin(), row.end());
             prev_extent = span * 0.5f;
         }
 

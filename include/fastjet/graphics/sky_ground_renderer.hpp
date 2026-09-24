@@ -2,23 +2,32 @@
 
 #include "fastjet/graphics/gl_common.hpp"
 #include "fastjet/graphics/shader.hpp"
+#include "fastjet/graphics/shader_library.hpp"
+#include "fastjet/graphics/frame_context.hpp"
 #include "fastjet/graphics/terrain_field.hpp"
 #include "fastjet/graphics/terrain_mesh.hpp"
+#include "fastjet/graphics/terrain_textures.hpp"
 #include "fastjet/fdm/flight_state.hpp"
+#include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <string>
 #include <vector>
 
 namespace fastjet::graphics {
 
-/// @brief Visual environment: scattering sky dome, procedural terrain, and the
-/// airfield surface with its markings.
+/// @brief Visual environment: scattering sky dome with cirrus, procedural
+/// terrain, and the airfield surface with its markings.
 ///
 /// The sky is an analytic single-scattering approximation (Rayleigh + Mie)
 /// rather than a fixed gradient, so the horizon reddens near the sun, the zenith
 /// deepens with altitude, and terrain haze matches the sky it fades into. The
-/// same sun direction and haze constants feed the terrain and cockpit shaders,
-/// which is what keeps the scene looking like one coherent lighting environment.
+/// same sun direction and haze constants feed the terrain, airframe and cockpit
+/// shaders, which is what keeps the scene one coherent lighting environment.
+///
+/// Every draw takes an optional FrameContext. Without one (standalone use and
+/// the render tests) the shaders fall back to calibrated default lighting, no
+/// clouds or shadows, and encode straight to the display.
 class SkyGroundRenderer {
 public:
     /// @brief Sun direction in NED, pointing *toward* the sun. Late-morning,
@@ -36,9 +45,36 @@ public:
         z = SUN_NED_Z * inv;
     }
 
+    [[nodiscard]] static std::array<float, 3> sun_dir_ned() noexcept {
+        std::array<float, 3> d{};
+        sun_dir_ned(d[0], d[1], d[2]);
+        return d;
+    }
+
+    /// @brief Surface types of the airfield decals, shaded procedurally.
+    enum class Surface : int {
+        GRASS = 0,    ///< Infield: the terrain material, so it meets the terrain seamlessly
+        ASPHALT = 1,  ///< Runway: rubber deposits, patching and aggregate
+        SHOULDER = 2, ///< Graded gravel margins
+        CONCRETE = 3, ///< Dispersal ramp: jointed slabs
+        PAINT = 4,    ///< Markings: vertex colour, worn and rubbered
+        LIGHT = 5,    ///< Edge, threshold and end lights: emissive
+        TAXIWAY = 6,  ///< Older asphalt, lighter, no touchdown rubber
+    };
+
+    /// Emitted radiance of the airfield lights (HDR, relative to their colour).
+    static constexpr float LIGHT_RADIANCE = 4.0f;
+
+    /// Cirrus pattern texture: resolution and noise cells across one tile.
+    static constexpr int kCirrusResolution = 1024;
+    static constexpr int kCirrusCells = 8;
+    /// Texture unit of the cirrus pattern in the sky shader.
+    static constexpr int kCirrusUnit = 1;
+
 private:
     GLuint sky_vao_ = 0;
     GLuint sky_vbo_ = 0;
+    GLuint cirrus_tex_ = 0;
     ShaderProgram sky_shader_;
 
     GLuint ground_vao_ = 0;
@@ -47,6 +83,7 @@ private:
     ShaderProgram ground_shader_;
 
     TerrainMesh terrain_;
+    TerrainTextures ground_textures_;
     ShaderProgram terrain_shader_;
 
     bool initialized_ = false;
@@ -78,120 +115,324 @@ private:
     /// @brief Airfield surface: apron, runway, and markings. These sit on the
     /// flat basin the terrain field guarantees around the field, so they need no
     /// height lookup, only a small bias to stay clear of the terrain mesh.
+    ///
+    /// Vertex layout: pos(3), colour(4), surface(1).
     void build_airfield() {
-        std::vector<float> verts; // pos(3), color(4)
+        std::vector<float> verts;
 
-        auto add_quad = [&](float x0, float y0, float z0,
-                            float x1, float y1, float z1,
-                            float x2, float y2, float z2,
-                            float x3, float y3, float z3,
-                            const Color4& col) {
+        auto add_cell = [&](float x0, float y0, float x1, float y1, float z,
+                            const Color4& col, float m) {
             // Reversed winding, matching TerrainMesh: NED is left-handed with
             // respect to the screen convention, so listing the corners in their
             // natural order yields a clockwise (back) face seen from above.
-            const float v[6][7] = {
-                {x0, y0, z0, col.r, col.g, col.b, col.a},
-                {x2, y2, z2, col.r, col.g, col.b, col.a},
-                {x1, y1, z1, col.r, col.g, col.b, col.a},
-                {x0, y0, z0, col.r, col.g, col.b, col.a},
-                {x3, y3, z3, col.r, col.g, col.b, col.a},
-                {x2, y2, z2, col.r, col.g, col.b, col.a}
+            const float v[6][8] = {
+                {x0, y0, z, col.r, col.g, col.b, col.a, m},
+                {x1, y1, z, col.r, col.g, col.b, col.a, m},
+                {x1, y0, z, col.r, col.g, col.b, col.a, m},
+                {x0, y0, z, col.r, col.g, col.b, col.a, m},
+                {x0, y1, z, col.r, col.g, col.b, col.a, m},
+                {x1, y1, z, col.r, col.g, col.b, col.a, m}
             };
-            for (int i = 0; i < 6; ++i) {
-                for (int j = 0; j < 7; ++j) {
-                    verts.push_back(v[i][j]);
+            for (const auto& vert : v) verts.insert(verts.end(), vert, vert + 8);
+        };
+        // Large surfaces are split into cells no bigger than kMaxCell, so the
+        // per-vertex haze interpolates accurately across them.
+        constexpr float kMaxCell = 80.0f;
+        auto add_quad = [&](float x0, float y0, float x1, float y1, float z,
+                            const Color4& col, Surface surf) {
+            const int nx = (std::max)(1, static_cast<int>(std::ceil((x1 - x0) / kMaxCell)));
+            const int ny = (std::max)(1, static_cast<int>(std::ceil((y1 - y0) / kMaxCell)));
+            const float dx = (x1 - x0) / static_cast<float>(nx);
+            const float dy = (y1 - y0) / static_cast<float>(ny);
+            for (int i = 0; i < nx; ++i) {
+                for (int j = 0; j < ny; ++j) {
+                    const float cx0 = x0 + dx * static_cast<float>(i);
+                    const float cy0 = y0 + dy * static_cast<float>(j);
+                    add_cell(cx0, cy0, i + 1 == nx ? x1 : cx0 + dx, j + 1 == ny ? y1 : cy0 + dy, z, col,
+                             static_cast<float>(surf));
                 }
             }
         };
 
-        // 1. Airfield apron: a graded pad that visually seats the runway in the
-        // surrounding terrain instead of letting asphalt meet raw hillside.
-        //
-        // TerrainMesh cuts a hole here so the two never fight for depth. That
-        // hole is snapped out to the 125 m cell grid, so the apron must cover
-        // the snapped bounds (-750..3750, -1000..1000), not just its own
-        // nominal footprint, or the seam would show through to the sky.
-        const Color4 apron_col{0.075f, 0.088f, 0.045f, 1.0f};
-        add_quad(-750.0f, -1000.0f, -0.05f,
-                 3750.0f, -1000.0f, -0.05f,
-                 3750.0f,  1000.0f, -0.05f,
-                 -750.0f,  1000.0f, -0.05f,
-                 apron_col);
+        // Decal heights: each layer sits a few centimetres above the one it
+        // covers; polygon offset in render_ground() does the rest.
+        constexpr float Z_APRON = -0.05f;
+        constexpr float Z_SHOULDER = -0.12f;
+        constexpr float Z_RAMP = -0.17f;
+        constexpr float Z_TAXI = -0.18f;
+        constexpr float Z_CONNECTOR = -0.19f;
+        constexpr float Z_RUNWAY = -0.20f;
+        constexpr float Z_PAINT = -0.28f;
+        constexpr float Z_RUNWAY_PAINT = -0.30f;
 
-        // 2. Runway surface (asphalt: 3,000 m x 60 m)
-        const Color4 asphalt_col{0.026f, 0.026f, 0.029f, 1.0f};
-        add_quad(0.0f, -30.0f, -0.20f,
-                 3000.0f, -30.0f, -0.20f,
-                 3000.0f,  30.0f, -0.20f,
-                 0.0f,  30.0f, -0.20f,
-                 asphalt_col);
-
-        // 3. Runway shoulders (lighter graded margin either side)
-        const Color4 shoulder_col{0.048f, 0.047f, 0.042f, 1.0f};
-        add_quad(0.0f, -46.0f, -0.14f, 3000.0f, -46.0f, -0.14f,
-                 3000.0f, -30.0f, -0.14f, 0.0f, -30.0f, -0.14f, shoulder_col);
-        add_quad(0.0f, 30.0f, -0.14f, 3000.0f, 30.0f, -0.14f,
-                 3000.0f, 46.0f, -0.14f, 0.0f, 46.0f, -0.14f, shoulder_col);
-
-        // 4. Centreline stripes (30 m dash, 20 m gap, width 0.9 m)
+        const Color4 none{1.0f, 1.0f, 1.0f, 1.0f};
         const Color4 white{0.62f, 0.62f, 0.60f, 1.0f};
+        const Color4 yellow{0.90f, 0.76f, 0.10f, 1.0f};
+
+        // 1. Infield grass. TerrainMesh cuts a hole here, snapped out to its
+        // 125 m cell grid, so the apron covers the snapped bounds
+        // (-750..3750, -1000..1000) or the seam would show through to the sky.
+        add_quad(-750.0f, -1000.0f, 3750.0f, 1000.0f, Z_APRON, none, Surface::GRASS);
+
+        // 2. Runway surface (3,000 m x 60 m) and graded shoulders.
+        add_quad(0.0f, -30.0f, 3000.0f, 30.0f, Z_RUNWAY, none, Surface::ASPHALT);
+        add_quad(0.0f, -46.0f, 3000.0f, -30.0f, Z_SHOULDER, none, Surface::SHOULDER);
+        add_quad(0.0f, 30.0f, 3000.0f, 46.0f, Z_SHOULDER, none, Surface::SHOULDER);
+
+        // 3. Centreline stripes (30 m dash, 20 m gap, width 0.9 m)
         for (float x = 120.0f; x < 2880.0f; x += 50.0f) {
-            add_quad(x, -0.45f, -0.30f,
-                     x + 30.0f, -0.45f, -0.30f,
-                     x + 30.0f,  0.45f, -0.30f,
-                     x,  0.45f, -0.30f,
-                     white);
+            add_quad(x, -0.45f, x + 30.0f, 0.45f, Z_RUNWAY_PAINT, white, Surface::PAINT);
         }
 
-        // 5. Runway edge lines
-        add_quad(0.0f, -29.4f, -0.30f, 3000.0f, -29.4f, -0.30f,
-                 3000.0f, -28.5f, -0.30f, 0.0f, -28.5f, -0.30f, white);
-        add_quad(0.0f, 28.5f, -0.30f, 3000.0f, 28.5f, -0.30f,
-                 3000.0f, 29.4f, -0.30f, 0.0f, 29.4f, -0.30f, white);
+        // 4. Runway edge lines
+        add_quad(0.0f, -29.4f, 3000.0f, -28.5f, Z_RUNWAY_PAINT, white, Surface::PAINT);
+        add_quad(0.0f, 28.5f, 3000.0f, 29.4f, Z_RUNWAY_PAINT, white, Surface::PAINT);
 
-        // 6. Threshold piano keys at both runway heads
+        // 5. Threshold piano keys at both runway heads
         for (float y = -24.0f; y <= 24.0f; y += 4.0f) {
-            add_quad(30.0f, y - 1.2f, -0.30f, 80.0f, y - 1.2f, -0.30f,
-                     80.0f, y + 1.2f, -0.30f, 30.0f, y + 1.2f, -0.30f, white);
-            add_quad(2920.0f, y - 1.2f, -0.30f, 2970.0f, y - 1.2f, -0.30f,
-                     2970.0f, y + 1.2f, -0.30f, 2920.0f, y + 1.2f, -0.30f, white);
+            add_quad(30.0f, y - 1.2f, 80.0f, y + 1.2f, Z_RUNWAY_PAINT, white, Surface::PAINT);
+            add_quad(2920.0f, y - 1.2f, 2970.0f, y + 1.2f, Z_RUNWAY_PAINT, white, Surface::PAINT);
         }
 
-        // 7. Touchdown zone markers, 150 m past each threshold
+        // 6. Touchdown zone markers, 150 m past each threshold
         for (float side : {-1.0f, 1.0f}) {
             for (float y0 : {8.0f, 14.0f}) {
-                add_quad(230.0f, side * y0, -0.30f, 275.0f, side * y0, -0.30f,
-                         275.0f, side * (y0 + 2.4f), -0.30f, 230.0f, side * (y0 + 2.4f), -0.30f, white);
-                add_quad(2725.0f, side * y0, -0.30f, 2770.0f, side * y0, -0.30f,
-                         2770.0f, side * (y0 + 2.4f), -0.30f, 2725.0f, side * (y0 + 2.4f), -0.30f, white);
+                const float ya = side * y0;
+                const float yb = side * (y0 + 2.4f);
+                add_quad(230.0f, (std::min)(ya, yb), 275.0f, (std::max)(ya, yb), Z_RUNWAY_PAINT, white, Surface::PAINT);
+                add_quad(2725.0f, (std::min)(ya, yb), 2770.0f, (std::max)(ya, yb), Z_RUNWAY_PAINT, white, Surface::PAINT);
             }
         }
 
-        // 8. Aiming point blocks
+        // 7. Aiming point blocks
         for (float side : {-1.0f, 1.0f}) {
-            add_quad(400.0f, side * 8.0f, -0.30f, 460.0f, side * 8.0f, -0.30f,
-                     460.0f, side * 14.0f, -0.30f, 400.0f, side * 14.0f, -0.30f, white);
-            add_quad(2540.0f, side * 8.0f, -0.30f, 2600.0f, side * 8.0f, -0.30f,
-                     2600.0f, side * 14.0f, -0.30f, 2540.0f, side * 14.0f, -0.30f, white);
+            const float ya = side * 8.0f;
+            const float yb = side * 14.0f;
+            add_quad(400.0f, (std::min)(ya, yb), 460.0f, (std::max)(ya, yb), Z_RUNWAY_PAINT, white, Surface::PAINT);
+            add_quad(2540.0f, (std::min)(ya, yb), 2600.0f, (std::max)(ya, yb), Z_RUNWAY_PAINT, white, Surface::PAINT);
         }
 
-        ground_vertex_count_ = static_cast<GLsizei>(verts.size() / 7);
+        // 8. Runway designators: "09" at the west end, "27" at the east end.
+        auto paint = [&](float rx0, float ry0, float rx1, float ry1) {
+            add_quad(rx0, ry0, rx1, ry1, Z_RUNWAY_PAINT, white, Surface::PAINT);
+        };
+        // Digit '0'
+        paint(110.0f, -5.5f, 114.0f, -1.5f);
+        paint(120.0f, -5.5f, 124.0f, -1.5f);
+        paint(114.0f, -5.5f, 120.0f, -4.5f);
+        paint(114.0f, -2.5f, 120.0f, -1.5f);
+        // Digit '9'
+        paint(110.0f, 1.5f, 124.0f, 2.5f);
+        paint(110.0f, 2.5f, 117.0f, 5.5f);
+        paint(110.0f, 4.5f, 124.0f, 5.5f);
+        paint(117.0f, 1.5f, 124.0f, 5.5f);
+        // Digit '2'
+        paint(2865.0f, -5.5f, 2879.0f, -4.5f);
+        paint(2875.0f, -4.5f, 2879.0f, -3.2f);
+        paint(2865.0f, -3.8f, 2879.0f, -3.0f);
+        paint(2865.0f, -3.0f, 2869.0f, -1.8f);
+        paint(2865.0f, -2.2f, 2879.0f, -1.5f);
+        // Digit '7'
+        paint(2865.0f, 1.5f, 2879.0f, 2.5f);
+        paint(2875.0f, 1.5f, 2879.0f, 5.5f);
+
+        // 9. Parallel taxiway (X = -300..3300 m, Y = -110..-85 m)
+        add_quad(-300.0f, -110.0f, 3300.0f, -85.0f, Z_TAXI, none, Surface::TAXIWAY);
+        add_quad(-300.0f, -118.0f, 3300.0f, -110.0f, Z_SHOULDER, none, Surface::SHOULDER);
+        add_quad(-300.0f, -85.0f, 3300.0f, -77.0f, Z_SHOULDER, none, Surface::SHOULDER);
+
+        // 10. Connectors linking the runway to the parallel taxiway: west
+        // turnoff, mid-west rapid exit, midfield, mid-east rapid exit, east.
+        struct Connector { float x0, x1; };
+        for (const Connector c : {Connector{-50.0f, 50.0f}, Connector{850.0f, 970.0f}, Connector{1450.0f, 1550.0f},
+                                  Connector{2030.0f, 2150.0f}, Connector{2950.0f, 3050.0f}}) {
+            add_quad(c.x0, -85.0f, c.x1, -30.0f, Z_CONNECTOR, none, Surface::TAXIWAY);
+            add_quad(c.x0 - 10.0f, -85.0f, c.x0, -30.0f, Z_SHOULDER, none, Surface::SHOULDER);
+            add_quad(c.x1, -85.0f, c.x1 + 10.0f, -30.0f, Z_SHOULDER, none, Surface::SHOULDER);
+        }
+
+        // 11. Aviation yellow taxiway centrelines and holding points.
+        add_quad(-290.0f, -98.0f, 3290.0f, -97.0f, Z_PAINT, yellow, Surface::PAINT);
+        for (float cx : {0.0f, 910.0f, 1500.0f, 2090.0f, 3000.0f}) {
+            add_quad(cx - 1.0f, -97.0f, cx + 1.0f, -30.0f, Z_PAINT, yellow, Surface::PAINT);
+            add_quad(cx - 18.0f, -44.0f, cx + 18.0f, -43.2f, Z_PAINT, yellow, Surface::PAINT);
+            add_quad(cx - 18.0f, -42.4f, cx + 18.0f, -41.6f, Z_PAINT, yellow, Surface::PAINT);
+        }
+
+        // 12. Dispersal ramp with six hardstands and lead-in lines.
+        add_quad(400.0f, -240.0f, 2600.0f, -110.0f, Z_RAMP, none, Surface::CONCRETE);
+        for (float pad_x : {600.0f, 950.0f, 1300.0f, 1650.0f, 2000.0f, 2350.0f}) {
+            add_quad(pad_x - 35.0f, -220.0f, pad_x + 35.0f, -130.0f, Z_CONNECTOR, none, Surface::TAXIWAY);
+            add_quad(pad_x - 0.5f, -210.0f, pad_x + 0.5f, -98.0f, Z_PAINT, yellow, Surface::PAINT);
+            add_quad(pad_x - 6.0f, -170.0f, pad_x + 6.0f, -169.2f, Z_PAINT, yellow, Surface::PAINT);
+        }
+
+        // 13. Runway lighting: edge lights every 60 m, green threshold bars,
+        // red end bars. Emissive, so they read at distance and glow at dusk.
+        const Color4 edge_light{0.96f, 0.94f, 0.70f, 1.0f};
+        for (float lx = 0.0f; lx <= 3000.0f; lx += 60.0f) {
+            add_quad(lx - 0.4f, -29.8f, lx + 0.4f, -29.0f, Z_PAINT, edge_light, Surface::LIGHT);
+            add_quad(lx - 0.4f, 29.0f, lx + 0.4f, 29.8f, Z_PAINT, edge_light, Surface::LIGHT);
+        }
+        const Color4 green_thresh{0.15f, 0.95f, 0.35f, 1.0f};
+        for (float ty = -28.0f; ty <= 28.0f; ty += 2.5f) {
+            add_quad(0.0f, ty - 0.4f, 2.0f, ty + 0.4f, Z_PAINT, green_thresh, Surface::LIGHT);
+            add_quad(2998.0f, ty - 0.4f, 3000.0f, ty + 0.4f, Z_PAINT, green_thresh, Surface::LIGHT);
+        }
+        const Color4 red_end{0.95f, 0.15f, 0.15f, 1.0f};
+        for (float ty = -28.0f; ty <= 28.0f; ty += 3.0f) {
+            add_quad(-4.0f, ty - 0.5f, -2.0f, ty + 0.5f, Z_PAINT, red_end, Surface::LIGHT);
+            add_quad(3002.0f, ty - 0.5f, 3004.0f, ty + 0.5f, Z_PAINT, red_end, Surface::LIGHT);
+        }
+
+        // Draw the top layer first (paint, then pavement, then grass): each
+        // lower layer is then rejected by the early depth test wherever it is
+        // covered instead of being shaded and overdrawn, and where depth
+        // precision runs out at range the upper layer still wins the tie.
+        {
+            constexpr size_t kFloatsPerQuad = 6 * 8;
+            const size_t quads = verts.size() / kFloatsPerQuad;
+            std::vector<size_t> order(quads);
+            for (size_t q = 0; q < quads; ++q) order[q] = q;
+            std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+                return verts[a * kFloatsPerQuad + 2] < verts[b * kFloatsPerQuad + 2]; // NED z: up is negative
+            });
+            std::vector<float> sorted;
+            sorted.reserve(verts.size());
+            for (size_t q : order) {
+                sorted.insert(sorted.end(), verts.begin() + static_cast<std::ptrdiff_t>(q * kFloatsPerQuad),
+                              verts.begin() + static_cast<std::ptrdiff_t>((q + 1) * kFloatsPerQuad));
+            }
+            verts.swap(sorted);
+        }
+
+        ground_vertex_count_ = static_cast<GLsizei>(verts.size() / 8);
 
         glGenVertexArrays(1, &ground_vao_);
         glGenBuffers(1, &ground_vbo_);
-
         glBindVertexArray(ground_vao_);
         glBindBuffer(GL_ARRAY_BUFFER, ground_vbo_);
-        glBufferData(GL_ARRAY_BUFFER,
-                     static_cast<GLsizeiptr>(verts.size() * sizeof(float)),
+        glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(verts.size() * sizeof(float)),
                      verts.data(), GL_STATIC_DRAW);
-
-        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 7 * sizeof(float), (void*)0);
+        constexpr GLsizei stride = 8 * sizeof(float);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<void*>(0));
         glEnableVertexAttribArray(0);
-        glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, 7 * sizeof(float), (void*)(3 * sizeof(float)));
+        glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<void*>(3 * sizeof(float)));
         glEnableVertexAttribArray(1);
-
+        glVertexAttribPointer(2, 1, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<void*>(7 * sizeof(float)));
+        glEnableVertexAttribArray(2);
         glBindVertexArray(0);
+    }
+
+    /// @brief Bakes the cirrus streak pattern into a tiling texture.
+    ///
+    /// Six octaves of warped noise per sky pixel cost ~2 ms at 1080p on an
+    /// integrated GPU; the pattern never changes, so it is evaluated once on
+    /// a periodic lattice (so it tiles) and sampled with one lookup.
+    bool bake_cirrus() {
+        const char* vert = R"(
+            #version 330 core
+            out vec2 vUV;
+            void main() {
+                vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);
+                vUV = p;
+                gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+            }
+        )";
+        const std::string frag = std::string(R"(
+            #version 330 core
+            in vec2 vUV;
+            out vec4 FragColor;
+            uniform int uCells;
+        )") + glsl::COMMON + R"(
+            // Value noise on a lattice that wraps every `period` cells.
+            float vnoise_periodic(vec2 p, int period) {
+                vec2 i = floor(p);
+                vec2 f = p - i;
+                vec2 u = f * f * (3.0 - 2.0 * f);
+                ivec2 c0 = ivec2(i) % period;
+                c0 += ivec2(lessThan(c0, ivec2(0))) * period;
+                ivec2 c1 = (c0 + 1) % period;
+                float a = hash21(c0), b = hash21(ivec2(c1.x, c0.y));
+                float d = hash21(ivec2(c0.x, c1.y)), e = hash21(c1);
+                return mix(mix(a, b, u.x), mix(d, e, u.x), u.y);
+            }
+            float fbm_periodic(vec2 p, int period, int octaves) {
+                float sum = 0.0, amp = 0.5, norm = 0.0;
+                for (int k = 0; k < octaves; ++k) {
+                    sum += amp * vnoise_periodic(p, period);
+                    norm += amp;
+                    p = p * 2.0 + vec2(float(k + 3));
+                    period *= 2;
+                    amp *= 0.5;
+                }
+                return sum / norm;
+            }
+            void main() {
+                vec2 q = vUV * float(uCells);
+                // Warp by a periodic field so the result still tiles.
+                float warp = fbm_periodic(q * 2.0, uCells * 2, 3);
+                FragColor = vec4(fbm_periodic(q + vec2(warp * 0.8, 0.0), uCells, 6), 0.0, 0.0, 1.0);
+            }
+        )";
+        ShaderProgram bake;
+        if (!bake.init_from_source(vert, frag.c_str())) return false;
+
+        glGenTextures(1, &cirrus_tex_);
+        glBindTexture(GL_TEXTURE_2D, cirrus_tex_);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, kCirrusResolution, kCirrusResolution, 0, GL_RED, GL_UNSIGNED_BYTE, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+        apply_texture_anisotropy(TerrainTextures::kAnisotropy);
+
+        GLint viewport[4];
+        glGetIntegerv(GL_VIEWPORT, viewport);
+        GLuint fbo = 0, vao = 0;
+        glGenFramebuffers(1, &fbo);
+        glGenVertexArrays(1, &vao);
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, cirrus_tex_, 0);
+        const bool ok = glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+        if (ok) {
+            glViewport(0, 0, kCirrusResolution, kCirrusResolution);
+            glDisable(GL_DEPTH_TEST);
+            glDisable(GL_BLEND);
+            bake.use();
+            bake.set_int("uCells", kCirrusCells);
+            glBindVertexArray(vao);
+            glDrawArrays(GL_TRIANGLES, 0, 3);
+            glBindVertexArray(0);
+            glUseProgram(0);
+        }
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glDeleteFramebuffers(1, &fbo);
+        glDeleteVertexArrays(1, &vao);
+        glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
+        glBindTexture(GL_TEXTURE_2D, cirrus_tex_);
+        glGenerateMipmap(GL_TEXTURE_2D);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        return ok;
+    }
+
+    /// Uniforms common to every environment shader for one draw.
+    void upload_frame(const ShaderProgram& s, const FrameContext* ctx, const math::Vector3& eye) const {
+        ground_textures_.bind(s, TerrainTextures::kFirstUnit);
+        if (ctx) {
+            ctx->upload(s);
+            ctx->bind_shadow(s, ctx->ground_shadow);
+        } else {
+            // Standalone: default lighting, display output, no clouds/shadow.
+            float sx, sy, sz;
+            sun_dir_ned(sx, sy, sz);
+            s.set_vec3("uSunDir", sx, sy, sz);
+            s.set_int("uHdrOutput", 0);
+            s.set_float("uCloudCoverage", 0.0f);
+            s.set_int("uShadowEnabled", 0);
+        }
+        s.set_vec3("uEyeNed", static_cast<float>(eye.x), static_cast<float>(eye.y), static_cast<float>(eye.z));
+        s.set_float("uAltitude", static_cast<float>(-eye.z));
     }
 
 public:
@@ -201,164 +442,14 @@ public:
         destroy();
     }
 
-    /// @brief GLSL common to every shader that touches the atmosphere.
-    ///
-    /// Sky colour and terrain haze are the same physical quantity: light
-    /// scattered into the view ray. Sharing one function means the horizon can
-    /// never show a seam, because the terrain fades into exactly the radiance
-    /// the sky quad would have drawn in that direction.
-    static constexpr const char* ATMOSPHERE_GLSL = R"(
-        // Sea-level scattering coefficients [1/m]. Rayleigh goes as 1/lambda^4,
-        // which is what makes the zenith blue and the horizon pale; Mie is the
-        // wavelength-neutral aerosol term.
-        const vec3  RAYLEIGH = vec3(5.8e-6, 13.5e-6, 33.1e-6);
-        const float MIE      = 21e-6;
-        const float SCALE_H  = 8500.0;   // [m] atmospheric scale height
-        const float EXPOSURE = 1.6;
-        const vec3  SUN_TINT = vec3(1.0, 0.96, 0.90);
-
-        /// Scattered radiance looking along `ray` from `altitude`, linear space.
-        ///
-        /// `path_mass` overrides the air mass for rays that do not run to the
-        /// top of the atmosphere. A ray hitting terrain a few km away traverses
-        /// far less air than the full column, and using the column value there
-        /// floods near ground with bright blue in-scatter.
-        vec3 sky_radiance_am(vec3 ray, vec3 sun_dir, float altitude,
-                             bool with_sun, float air_mass) {
-            float cos_sun = clamp(dot(ray, sun_dir), -1.0, 1.0);
-
-            float density = exp(-altitude / SCALE_H);
-
-            vec3  tau_r = RAYLEIGH * SCALE_H * density;
-            float tau_m = MIE * SCALE_H * density;
-
-            float phase_r = 0.75 * (1.0 + cos_sun * cos_sun);
-            const float g = 0.76;
-            float g2 = g * g;
-            float phase_m = (1.0 - g2) /
-                (4.0 * 3.14159265 * pow(1.0 + g2 - 2.0 * g * cos_sun, 1.5));
-
-            // Single scattering with self-extinction. The (1-exp(-t))/t factor
-            // is the mean attenuation along the path, which is what stops the
-            // horizon saturating to white.
-            vec3 od = (tau_r + vec3(tau_m)) * air_mass;
-            vec3 atten = (vec3(1.0) - exp(-od)) / max(od, vec3(1e-6));
-            vec3 inscat = (tau_r * phase_r + vec3(tau_m * phase_m)) * air_mass * atten;
-
-            vec3 sky = SUN_TINT * inscat * EXPOSURE;
-
-            if (with_sun) {
-                // Sun disc (~0.53 deg) plus a soft aureole.
-                float sun_disc = smoothstep(0.99990, 0.99996, cos_sun);
-                float aureole  = pow(max(cos_sun, 0.0), 1200.0) * 0.35;
-                sky += SUN_TINT * (sun_disc * 14.0 + aureole);
-            }
-            return sky;
-        }
-
-        /// Sky dome radiance: the ray runs to the top of the atmosphere, so the
-        /// air mass is the full slant column.
-        vec3 sky_radiance(vec3 ray, vec3 sun_dir, float altitude, bool with_sun) {
-            float up = -ray.z;                     // NED: up is -Z
-            float mu = max(up, 0.015);             // 1 at zenith, large at horizon
-            return sky_radiance_am(ray, sun_dir, altitude, with_sun, 1.0 / mu);
-        }
-
-        /// In-scattered light between the eye and a surface `dist` away.
-        ///
-        /// Air mass is the density-weighted path length in units of the vertical
-        /// scale height. Close in, a short ray scatters little and the haze is
-        /// dim. Far out, the ray grazes through dense low air for tens of km and
-        /// its air mass approaches that of the sky column in the same direction.
-        ///
-        /// The far limit matters as much as the near one: where haze becomes
-        /// opaque the terrain must be *exactly* the colour the sky quad draws,
-        /// or the horizon shows a rim. Blending the air mass toward the sky's
-        /// own value makes the two agree in the limit by construction.
-        vec3 haze_radiance(vec3 ray, vec3 sun_dir, float eye_alt,
-                           float surf_alt, float dist) {
-            float mean_alt = 0.5 * (eye_alt + surf_alt);
-
-            // Mean relative density along the ray.
-            float dh = eye_alt - surf_alt;
-            float rho;
-            if (abs(dh) < 1.0) {
-                rho = exp(-max(mean_alt, 0.0) / SCALE_H);
-            } else {
-                rho = (exp(-max(surf_alt, 0.0) / SCALE_H) -
-                       exp(-max(eye_alt, 0.0) / SCALE_H)) * SCALE_H / dh;
-            }
-            float near_am = rho * dist / SCALE_H;
-
-            // The air mass the sky quad uses for this same direction.
-            float up = -ray.z;
-            float sky_am = 1.0 / max(up, 0.015);
-
-            // Converge on the sky as the haze saturates, so distant ground and
-            // sky meet with no step.
-            float t = smoothstep(20000.0, 60000.0, dist);
-            float am = mix(near_am, sky_am, t);
-
-            // Likewise let the reference altitude drift to the eye altitude, so
-            // the far field matches the sky's own vertical density.
-            float alt = mix(mean_alt, eye_alt, t);
-
-            return sky_radiance_am(ray, sun_dir, alt, false, am);
-        }
-
-        /// Filmic-ish tonemap then gamma. Applied identically everywhere so the
-        /// sky and the ground share one response curve.
-        vec3 tonemap(vec3 c) {
-            c = c / (c + vec3(1.0));
-            return pow(c, vec3(1.0 / 2.2));
-        }
-
-        /// Fraction of a view ray's radiance that is haze rather than surface.
-        ///
-        /// Aerosol haze lives in the boundary layer, not throughout the column,
-        /// so optical depth must be integrated along the ray rather than taken
-        /// as a constant per metre. For an exponential profile the integral
-        /// between two altitudes has a closed form, which is what keeps the
-        /// ground crisp from high up while still washing out along the deck.
-        float haze_fraction(float eye_alt, float surf_alt, float dist) {
-            const float BETA0 = 7.4e-5;   // [1/m] sea-level extinction (~53 km visibility)
-            const float H_AER = 1200.0;   // [m] aerosol scale height
-
-            float dh = eye_alt - surf_alt;
-            float rho_eye  = exp(-max(eye_alt, 0.0)  / H_AER);
-            float rho_surf = exp(-max(surf_alt, 0.0) / H_AER);
-
-            // Mean density along the ray. When the two ends are at nearly the
-            // same height the closed form degenerates, so fall back to the
-            // local density there.
-            float mean_rho;
-            if (abs(dh) < 1.0) {
-                mean_rho = rho_surf;
-            } else {
-                mean_rho = (rho_surf - rho_eye) * H_AER / dh;
-            }
-
-            float od = BETA0 * mean_rho * dist;
-            float fog = 1.0 - exp(-od);
-
-            // The terrain mesh stops at ~91 km on axis. Exponential haze alone
-            // is still only ~0.98 opaque out there, and that last two percent of
-            // dark ground against a bright sky is a visible rim at the horizon.
-            // Force the far field fully into haze well inside the mesh edge, so
-            // the ground dissolves rather than ending.
-            const float FADE_START = 42000.0;
-            const float FADE_END   = 70000.0;
-            float edge = smoothstep(FADE_START, FADE_END, dist);
-
-            return clamp(max(fog, edge), 0.0, 1.0);
-        }
-    )";
+    /// @brief The shared atmosphere GLSL (see glsl::ATMOSPHERE).
+    static constexpr const char* ATMOSPHERE_GLSL = glsl::ATMOSPHERE;
 
     bool init() {
         if (initialized_) return true;
 
         // -------------------------------------------------------------------
-        // Sky: analytic single-scattering dome
+        // Sky: analytic single-scattering dome with a cirrus deck
         // -------------------------------------------------------------------
         const char* sky_vert = R"(
             #version 330 core
@@ -376,16 +467,40 @@ public:
             out vec4 FragColor;
 
             uniform mat4  uInvViewProj;
-            uniform vec3  uSunDir;    // NED, points toward the sun
             uniform float uAltitude;  // [m] above sea level
-        )") + ATMOSPHERE_GLSL + R"(
+            uniform vec3  uEyeNed;
+            uniform float uCirrus;    // cirrus cover, 0 = none
+            const float CIRRUS_CELLS = )" + std::to_string(kCirrusCells) + R"(;
+        )") + glsl::COMMON + glsl::OUTPUT + glsl::ATMOSPHERE + glsl::LIGHTING + glsl::CLOUDS + R"(
+            const float CIRRUS_ALT = 9500.0; // [m]
+            uniform sampler2D uCirrusTex;    // tiling streak pattern, CIRRUS_CELLS cells across
+
+            /// Thin, wind-stretched ice cloud, lit mostly by forward scatter.
+            vec3 add_cirrus(vec3 sky, vec3 ray) {
+                if (uCirrus <= 0.0 || ray.z > -0.005 || uAltitude >= CIRRUS_ALT) return sky;
+                float t = (CIRRUS_ALT - uAltitude) / -ray.z;
+                vec2 p = uEyeNed.xy + ray.xy * t + uCloudOffset * 0.6;
+                const mat2 STRETCH = mat2(0.94, 0.34, -0.34, 0.94);
+                vec2 q = STRETCH * p * vec2(1.0 / 14000.0, 1.0 / 3200.0);
+                float streak = texture(uCirrusTex, q / CIRRUS_CELLS).r;
+                float cover = smoothstep(1.0 - uCirrus * 0.55, 1.0 - uCirrus * 0.55 + 0.25, streak);
+                // Thin toward the horizon, where the deck is far and hazy.
+                cover *= exp(-t / 90000.0) * 0.55;
+                float mu = dot(ray, uSunDir);
+                float g = 0.7;
+                float hg = (1.0 - g * g) / pow(1.0 + g * g - 2.0 * g * mu, 1.5) / (4.0 * PI);
+                vec3 lit = sun_radiance() * (0.18 + hg * 1.4) + sky_ambient() * 0.8;
+                return mix(sky, lit, cover);
+            }
+
             void main() {
                 vec4 near_world = uInvViewProj * vec4(vPos, -1.0, 1.0);
                 vec4 far_world  = uInvViewProj * vec4(vPos,  1.0, 1.0);
                 vec3 ray = normalize(far_world.xyz / far_world.w - near_world.xyz / near_world.w);
 
                 vec3 sky = sky_radiance(ray, uSunDir, uAltitude, true);
-                FragColor = vec4(tonemap(sky), 1.0);
+                sky = add_cirrus(sky, ray);
+                FragColor = scene_output(sky, 1.0);
             }
         )";
 
@@ -394,9 +509,26 @@ public:
         }
 
         // -------------------------------------------------------------------
-        // Terrain: elevation/slope palette with sun lighting and aerial haze
+        // Terrain: procedural ground material, sun, sky, clouds, aerial haze
         // -------------------------------------------------------------------
-        const char* terr_vert = R"(
+        // Aerial perspective varies smoothly with range, so it is evaluated
+        // per vertex (the airfield decals are subdivided for this) and
+        // interpolated: the scattering integral is the costliest part of
+        // shading a ground pixel otherwise.
+        const std::string haze_vert_common = std::string(glsl::COMMON) + glsl::ATMOSPHERE + R"(
+            uniform vec3  uSunDir;
+            uniform float uAltitude;
+            out vec3  vHaze;
+            out float vFog;
+            void compute_haze(vec3 world, vec3 eye) {
+                float dist = length(world - eye);
+                vec3 ray = (world - eye) / max(dist, 1e-3);
+                vHaze = haze_radiance(ray, uSunDir, uAltitude, -world.z, dist);
+                vFog = haze_fraction(uAltitude, -world.z, dist);
+            }
+        )";
+
+        const std::string terr_vert = std::string(R"(
             #version 330 core
             layout (location = 0) in vec3 aPos;
             layout (location = 1) in vec3 aNormal;
@@ -409,13 +541,61 @@ public:
             out float vHeight;
             out float vDist;
             out vec3  vWorld;
-
+        )") + haze_vert_common + R"(
             void main() {
                 vNormal = aNormal;
                 vHeight = aHeight;
                 vWorld  = aPos;
                 vDist   = length(aPos - uEyeNed);
+                compute_haze(aPos, uEyeNed);
                 gl_Position = uViewProj * vec4(aPos, 1.0);
+            }
+        )";
+
+        // Shared lighting for everything on the ground, including water.
+        const std::string ground_common = std::string(glsl::COMMON) + glsl::OUTPUT + glsl::ATMOSPHERE +
+                                          glsl::LIGHTING + glsl::SHADOW + glsl::CLOUDS +
+                                          glsl::GROUND_BAKED + R"(
+            uniform vec3  uEyeNed;
+            uniform float uAltitude;
+            in vec3  vHaze;
+            in float vFog;
+
+            /// Detail relief: perturbs the normal with small-scale bumps that
+            /// fade out before they could alias.
+            vec3 detail_normal(vec3 n, vec2 xy, float dist, float amount) {
+                float fade = 1.0 - smoothstep(600.0, 4000.0, dist);
+                if (fade <= 0.0 || amount <= 0.0) return n;
+                vec2 p = xy * 0.09;
+                vec2 grad = vnoise_d(p).yz + 0.5 * 3.1 * vnoise_d(p * 3.1).yz;
+                vec3 bump = vec3(grad * (0.3 * fade * amount), 0.0);
+                return normalize(n + bump);
+            }
+
+            /// Lights a ground sample and applies aerial perspective.
+            vec3 shade_ground(GroundSample g, vec3 world, vec3 n, float sky_occ) {
+                vec3 v = normalize(uEyeNed - world);
+                float vis = sun_shadow(world, n, gl_FragCoord.xy) * cloud_shadow(world, uSunDir);
+                vec3 lit;
+                if (g.water > 0.0) {
+                    // Wind ripples, a dark body and the reflected sky, sun glint included.
+                    vec2 p = world.xy * 0.35;
+                    vec3 wn = normalize(vec3((vnoise(p) - 0.5) * 0.12, (vnoise(p + 7.7) - 0.5) * 0.12, -1.0));
+                    float ndv = max(dot(wn, v), 1e-3);
+                    float F = 0.02 + 0.98 * pow(1.0 - ndv, 5.0);
+                    vec3 r = reflect(-v, wn);
+                    r.z = min(r.z, -0.002);
+                    vec3 refl = sky_radiance(r, uSunDir, max(-world.z, 0.0), true);
+                    refl = mix(sky_radiance(r, uSunDir, max(-world.z, 0.0), false), refl, vis);
+                    vec3 body = g.albedo * (sun_radiance() * max(-uSunDir.z, 0.0) * vis + sky_ambient());
+                    vec3 wet = mix(body, refl, F);
+                    vec3 dry = g.albedo * (sun_radiance() * max(dot(n, uSunDir), 0.0) * vis + hemi_ambient(n) * sky_occ);
+                    lit = mix(dry, wet, g.water);
+                } else {
+                    lit = sun_brdf(g.albedo, 0.0, g.roughness, n, v, uSunDir) * vis
+                        + g.albedo * hemi_ambient(n) * sky_occ * (1.0 - 0.35 * g.forest);
+                }
+                return mix(lit, vHaze, vFog);
             }
         )";
 
@@ -426,95 +606,42 @@ public:
             in float vDist;
             in vec3  vWorld;
             out vec4 FragColor;
-
-            uniform vec3  uSunDir;
-            uniform float uAltitude;
-            uniform vec3  uEyeNed;
-        )") + ATMOSPHERE_GLSL + R"(
-            // Cheap hash-based value noise, used only to break up flat colour
-            // bands. Matching the CPU field exactly is unnecessary here.
-            float hash(vec2 p) {
-                return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
-            }
-            float noise(vec2 p) {
-                vec2 i = floor(p), f = fract(p);
-                f = f * f * (3.0 - 2.0 * f);
-                return mix(mix(hash(i), hash(i + vec2(1, 0)), f.x),
-                           mix(hash(i + vec2(0, 1)), hash(i + vec2(1, 1)), f.x), f.y);
-            }
-
+        )") + ground_common + R"(
             void main() {
                 vec3 n = normalize(vNormal);
-
-                // Slope: 1.0 on flat ground (normal straight up in NED = -Z).
-                float flatness = clamp(-n.z, 0.0, 1.0);
-                float slope = 1.0 - flatness;
-
-                // Elevation palette, authored as linear reflectances. Real
-                // landscape albedo is low: grass ~0.15, dry scrub ~0.20,
-                // rock ~0.18. Values much above that read as painted plastic.
-                vec3 lowland  = vec3(0.055, 0.085, 0.042);
-                vec3 meadow   = vec3(0.085, 0.105, 0.050);
-                vec3 upland   = vec3(0.125, 0.110, 0.062);
-                vec3 rock     = vec3(0.105, 0.098, 0.090);
-                vec3 snow     = vec3(0.700, 0.730, 0.780);
-
-                float h = vHeight;
-                vec3 col = mix(lowland, meadow, smoothstep(0.0, 120.0, h));
-                col = mix(col, upland,  smoothstep(110.0, 300.0, h));
-                col = mix(col, rock,    smoothstep(300.0, 480.0, h));
-
-                // Steep faces expose rock regardless of height.
-                col = mix(col, rock, smoothstep(0.30, 0.68, slope));
-
-                // Snow only where it can lie: high, and not on steep faces.
-                float snow_line = smoothstep(540.0, 615.0, h) * smoothstep(0.55, 0.82, flatness);
-                col = mix(col, snow, snow_line);
-
-                // Multi-scale mottling so large triangles do not read as flat.
-                float m = noise(vWorld.xy * 0.0016) * 0.5 + noise(vWorld.xy * 0.0071) * 0.5;
-                col *= 0.82 + 0.34 * m;
-
-                // Direct sun + sky ambient, in linear space. The ambient term is
-                // weighted by openness so gullies stay darker than ridges.
-                float ndl = max(dot(n, uSunDir), 0.0);
-                vec3 sun_col = vec3(1.0, 0.95, 0.86) * 2.9;
-                vec3 sky_col = vec3(0.30, 0.42, 0.62) * 0.65;
-                float sky_occ = 0.55 + 0.45 * flatness;
-                vec3 lit = col * (sun_col * ndl + sky_col * sky_occ);
-
-                // Aerial perspective: fade into the radiance the sky itself
-                // would show along this exact view ray. Because both sides use
-                // sky_radiance(), the horizon has no seam by construction.
-                vec3 ray = normalize(vWorld - uEyeNed);
-                vec3 haze = haze_radiance(ray, uSunDir, uAltitude, -vWorld.z, vDist);
-                float fog = haze_fraction(uAltitude, -vWorld.z, vDist);
-                lit = mix(lit, haze, fog);
-
-                FragColor = vec4(tonemap(lit), 1.0);
+                float level = clamp(-n.z, 0.0, 1.0);
+                GroundSample g = ground_baked(vWorld, vDist);
+                n = detail_normal(n, vWorld.xy, vDist, 1.0 - g.water);
+                float sky_occ = 0.55 + 0.45 * level;
+                FragColor = scene_output(shade_ground(g, vWorld, n, sky_occ), 1.0);
             }
         )";
 
-        if (!terrain_shader_.init_from_source(terr_vert, terr_frag.c_str())) {
+        if (!terrain_shader_.init_from_source(terr_vert.c_str(), terr_frag.c_str())) {
             return false;
         }
 
         // -------------------------------------------------------------------
-        // Airfield: flat vertex-coloured geometry, same lighting and haze
+        // Airfield: procedural pavement, paint and lights on the flat basin
         // -------------------------------------------------------------------
-        const char* gnd_vert = R"(
+        const std::string gnd_vert = std::string(R"(
             #version 330 core
             layout (location = 0) in vec3 aPos;
             layout (location = 1) in vec4 aColor;
+            layout (location = 2) in float aSurface;
             uniform mat4 uViewProj;
             uniform vec3 uEyeNed;
             out vec4  vColor;
             out float vDist;
             out vec3  vWorld;
+            flat out int vSurface;
+        )") + haze_vert_common + R"(
             void main() {
                 vColor = aColor;
                 vWorld = aPos;
                 vDist  = length(aPos - uEyeNed);
+                vSurface = int(aSurface + 0.5);
+                compute_haze(aPos, uEyeNed);
                 gl_Position = uViewProj * vec4(aPos, 1.0);
             }
         )";
@@ -524,35 +651,114 @@ public:
             in vec4  vColor;
             in float vDist;
             in vec3  vWorld;
+            flat in int vSurface;
             out vec4 FragColor;
+        )") + ground_common + R"(
+            const int GRASS = 0, ASPHALT = 1, SHOULDER = 2, CONCRETE = 3, PAINT = 4, LIGHT = 5, TAXIWAY = 6;
+            const float LIGHT_RADIANCE = )" + std::to_string(LIGHT_RADIANCE) + R"(;
 
-            uniform vec3  uSunDir;
-            uniform float uAltitude;
-            uniform vec3  uEyeNed;
-        )") + ATMOSPHERE_GLSL + R"(
+            /// Rubber laid down by tyres in the touchdown zones, streaked along
+            /// the runway and concentrated either side of the centreline.
+            float rubber(vec2 xy) {
+                float tdz = smoothstep(150.0, 320.0, xy.x) * smoothstep(1000.0, 650.0, xy.x)
+                          + smoothstep(2000.0, 2350.0, xy.x) * smoothstep(2850.0, 2680.0, xy.x);
+                float lane = smoothstep(15.0, 5.0, abs(xy.y)) * (0.55 + 0.45 * smoothstep(0.5, 3.5, abs(xy.y)));
+                float zone = tdz * lane;
+                if (zone <= 0.0) return 0.0; // most of the runway: no noise to evaluate
+                float streak = vnoise(vec2(xy.x * 0.015, xy.y * 1.7)) * 0.6 + vnoise(vec2(xy.x * 0.06, xy.y * 4.1)) * 0.4;
+                return zone * smoothstep(0.25, 0.75, streak);
+            }
+
+            vec3 asphalt(vec2 xy, float near, bool runway) {
+                // Broad tone (laying runs, weathering) and darker repair patches.
+                float tone = vnoise(xy * vec2(0.004, 0.03));
+                float patches = smoothstep(0.62, 0.66, vnoise(xy * 0.045 + 11.0));
+                // Weathered asphalt: dark, faintly cool (bitumen binder over
+                // grey aggregate).
+                vec3 c = vec3(0.026, 0.027, 0.030) * (0.82 + 0.32 * tone);
+                c = mix(c, vec3(0.022, 0.022, 0.024), patches * 0.7);
+                // Aggregate grain, only where it can resolve.
+                if (near > 0.0) c *= mix(1.0, 0.86 + 0.28 * vnoise(xy * 9.0), near);
+                if (runway) c = mix(c, vec3(0.010, 0.010, 0.011), rubber(xy) * 0.85);
+                else c *= 1.18; // older, oxidised taxiway surface
+                return c;
+            }
+
+            vec3 concrete(vec2 xy, float near) {
+                // 5 m slabs with sealed joints and per-slab tone.
+                vec2 cell = floor(xy / 5.0);
+                vec2 f = fract(xy / 5.0);
+                float joint = 1.0 - smoothstep(0.0, 0.012, min(min(f.x, 1.0 - f.x), min(f.y, 1.0 - f.y)));
+                float slab = hash21(ivec2(cell));
+                float stain = vnoise(xy * 0.35);
+                vec3 c = vec3(0.080, 0.080, 0.075) * (0.88 + 0.2 * slab) * (0.85 + 0.25 * stain);
+                return mix(c, vec3(0.030), joint * near);
+            }
+
             void main() {
-                // The airfield is flat, so its normal is straight up in NED.
-                const vec3 n = vec3(0.0, 0.0, -1.0);
-                float ndl = max(dot(n, uSunDir), 0.0);
-                vec3 sun_col = vec3(1.0, 0.95, 0.86) * 2.9;
-                vec3 sky_col = vec3(0.30, 0.42, 0.62) * 0.65;
-                vec3 lit = vColor.rgb * (sun_col * ndl + sky_col);
+                vec2 xy = vWorld.xy;
+                float near = 1.0 - smoothstep(300.0, 2500.0, vDist);
+                const vec3 up = vec3(0.0, 0.0, -1.0);
+                GroundSample g;
+                g.roughness = 0.85;
+                g.water = 0.0;
+                g.forest = 0.0;
+                vec3 emit = vec3(0.0);
 
-                vec3 ray = normalize(vWorld - uEyeNed);
-                vec3 haze = haze_radiance(ray, uSunDir, uAltitude, -vWorld.z, vDist);
-                lit = mix(lit, haze, haze_fraction(uAltitude, -vWorld.z, vDist));
+                if (vSurface == GRASS) {
+                    g = ground_baked(vWorld, vDist);
+                } else if (vSurface == ASPHALT || vSurface == TAXIWAY) {
+                    g.albedo = asphalt(xy, near, vSurface == ASPHALT);
+                    g.roughness = 0.95; // weathered, open-textured surface
+                } else if (vSurface == SHOULDER) {
+                    float grit = vnoise(xy * 3.0) * 0.6 + vnoise(xy * 0.3) * 0.4;
+                    g.albedo = vec3(0.060, 0.056, 0.047) * (0.8 + 0.4 * grit);
+                    g.roughness = 0.95;
+                } else if (vSurface == CONCRETE) {
+                    g.albedo = concrete(xy, near);
+                    g.roughness = 0.9;
+                } else if (vSurface == PAINT) {
+                    // Paint wears through to the surface below and picks up
+                    // rubber where it lies in the touchdown zones.
+                    float wear = near > 0.0 ? smoothstep(0.55, 0.85, vnoise(xy * 2.3)) * 0.35 * near : 0.0;
+                    vec3 under = asphalt(xy, near, false);
+                    g.albedo = mix(vColor.rgb, under, wear);
+                    g.albedo = mix(g.albedo, vec3(0.012), rubber(xy) * 0.6);
+                    g.roughness = 0.6;
+                } else {
+                    g.albedo = vColor.rgb * 0.3;
+                    emit = vColor.rgb * LIGHT_RADIANCE;
+                }
 
-                FragColor = vec4(tonemap(lit), vColor.a);
+                // Paved surfaces are smooth at the scale the bumps work at.
+                vec3 n = vSurface == GRASS ? detail_normal(up, xy, vDist, 1.0) : up;
+                vec3 lit = shade_ground(g, vWorld, n, 1.0) + emit;
+                FragColor = scene_output(lit, 1.0);
             }
         )";
 
-        if (!ground_shader_.init_from_source(gnd_vert, gnd_frag.c_str())) {
+        if (!ground_shader_.init_from_source(gnd_vert.c_str(), gnd_frag.c_str())) {
             return false;
         }
+
+        // Samplers on their reserved units, so types never alias.
+        for (const ShaderProgram* s : {&terrain_shader_, &ground_shader_}) {
+            s->use();
+            s->set_int("uShadowMap", FrameContext::kShadowUnit);
+            s->set_int("uCloudMap", CloudSettings::kMapUnit);
+        }
+        glUseProgram(0);
 
         build_sky_quad();
         build_airfield();
         terrain_.init();
+        if (!ground_textures_.init() || !bake_cirrus()) {
+            return false;
+        }
+        sky_shader_.use();
+        sky_shader_.set_int("uCirrusTex", kCirrusUnit);
+        sky_shader_.set_int("uCloudMap", CloudSettings::kMapUnit);
+        glUseProgram(0);
 
         initialized_ = true;
         return true;
@@ -561,9 +767,11 @@ public:
     void destroy() noexcept {
         if (sky_vao_) { glDeleteVertexArrays(1, &sky_vao_); sky_vao_ = 0; }
         if (sky_vbo_) { glDeleteBuffers(1, &sky_vbo_); sky_vbo_ = 0; }
+        if (cirrus_tex_) { glDeleteTextures(1, &cirrus_tex_); cirrus_tex_ = 0; }
         if (ground_vao_) { glDeleteVertexArrays(1, &ground_vao_); ground_vao_ = 0; }
         if (ground_vbo_) { glDeleteBuffers(1, &ground_vbo_); ground_vbo_ = 0; }
         terrain_.destroy();
+        ground_textures_.destroy();
         sky_shader_.destroy();
         ground_shader_.destroy();
         terrain_shader_.destroy();
@@ -573,44 +781,52 @@ public:
     /// @brief Render the scattering sky dome.
     /// @param inv_view_proj Inverse of the infinity view-projection matrix
     /// @param altitude_m Eye altitude above sea level [m]
-    void render_sky(const Mat4& inv_view_proj, float altitude_m = 0.0f) {
+    /// @param ctx Frame lighting, or null for standalone defaults
+    /// @param cirrus Cirrus cover in [0, 1]
+    void render_sky(const Mat4& inv_view_proj, float altitude_m = 0.0f,
+                    const FrameContext* ctx = nullptr, float cirrus = 0.0f) {
         if (!initialized_) return;
-
-        float sx, sy, sz;
-        sun_dir_ned(sx, sy, sz);
 
         glDepthMask(GL_FALSE); // Don't write depth for sky
         sky_shader_.use();
+        const math::Vector3 eye = ctx ? ctx->eye_ned : math::Vector3(0.0, 0.0, -altitude_m);
+        if (ctx) {
+            ctx->upload(sky_shader_);
+        } else {
+            float sx, sy, sz;
+            sun_dir_ned(sx, sy, sz);
+            sky_shader_.set_vec3("uSunDir", sx, sy, sz);
+            sky_shader_.set_int("uHdrOutput", 0);
+        }
         sky_shader_.set_mat4("uInvViewProj", inv_view_proj);
-        sky_shader_.set_vec3("uSunDir", sx, sy, sz);
         sky_shader_.set_float("uAltitude", altitude_m);
+        sky_shader_.set_vec3("uEyeNed", static_cast<float>(eye.x), static_cast<float>(eye.y),
+                             static_cast<float>(eye.z));
+        sky_shader_.set_float("uCirrus", cirrus);
+        glActiveTexture(GL_TEXTURE0 + kCirrusUnit);
+        glBindTexture(GL_TEXTURE_2D, cirrus_tex_);
+        glActiveTexture(GL_TEXTURE0);
 
         glBindVertexArray(sky_vao_);
         glDrawArrays(GL_TRIANGLES, 0, 6);
         glBindVertexArray(0);
+        glActiveTexture(GL_TEXTURE0 + kCirrusUnit);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        glActiveTexture(GL_TEXTURE0);
         glDepthMask(GL_TRUE);
     }
 
     /// @brief Render procedural terrain, then the airfield surface on top of it.
     /// @param view_proj World view-projection matrix
     /// @param eye_ned Eye position in NED [m], for range-based haze
-    void render_ground(const Mat4& view_proj, const math::Vector3& eye_ned) {
+    /// @param ctx Frame lighting, or null for standalone defaults
+    void render_ground(const Mat4& view_proj, const math::Vector3& eye_ned, const FrameContext* ctx = nullptr) {
         if (!initialized_) return;
-
-        float sx, sy, sz;
-        sun_dir_ned(sx, sy, sz);
-
-        const auto ex = static_cast<float>(eye_ned.x);
-        const auto ey = static_cast<float>(eye_ned.y);
-        const auto ez = static_cast<float>(eye_ned.z);
-        const float altitude = -ez;
 
         // Terrain first, at true depth.
         terrain_shader_.use();
+        upload_frame(terrain_shader_, ctx, eye_ned);
         terrain_shader_.set_mat4("uViewProj", view_proj);
-        terrain_shader_.set_vec3("uSunDir", sx, sy, sz);
-        terrain_shader_.set_vec3("uEyeNed", ex, ey, ez);
-        terrain_shader_.set_float("uAltitude", altitude);
         terrain_.draw();
 
         // Airfield markings are coplanar decals on the flat basin: bias them
@@ -619,16 +835,20 @@ public:
         glPolygonOffset(-2.0f, -2.0f);
 
         ground_shader_.use();
+        upload_frame(ground_shader_, ctx, eye_ned);
         ground_shader_.set_mat4("uViewProj", view_proj);
-        ground_shader_.set_vec3("uSunDir", sx, sy, sz);
-        ground_shader_.set_vec3("uEyeNed", ex, ey, ez);
-        ground_shader_.set_float("uAltitude", altitude);
 
         glBindVertexArray(ground_vao_);
         glDrawArrays(GL_TRIANGLES, 0, ground_vertex_count_);
         glBindVertexArray(0);
 
         glDisable(GL_POLYGON_OFFSET_FILL);
+        for (int unit : {FrameContext::kShadowUnit, CloudSettings::kMapUnit, TerrainTextures::kFirstUnit,
+                         TerrainTextures::kFirstUnit + 1, TerrainTextures::kFirstUnit + 2}) {
+            glActiveTexture(GL_TEXTURE0 + static_cast<GLenum>(unit));
+            glBindTexture(GL_TEXTURE_2D, 0);
+        }
+        glActiveTexture(GL_TEXTURE0);
     }
 
     [[nodiscard]] GLsizei terrain_vertex_count() const noexcept {

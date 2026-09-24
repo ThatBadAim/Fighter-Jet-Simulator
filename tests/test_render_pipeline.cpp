@@ -1,3 +1,5 @@
+#define CGLTF_IMPLEMENTATION
+#define STB_IMAGE_IMPLEMENTATION
 #include "fastjet/graphics/render_engine.hpp"
 #include <SDL3/SDL.h>
 #include <iostream>

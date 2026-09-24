@@ -52,13 +52,14 @@ struct MassProperties {
     }
 
     /**
-     * @brief Creates standard Clean F-16C Block 50 mass properties.
-     * Empty weight: 20,500 lbs (~9,298.64 kg).
-     * Standard Stevens & Lewis / NASA Langley inertia tensor:
+     * @brief The Stevens & Lewis / NASA Langley F-16 reference test article.
+     * Flight weight: 20,500 lbs (~9,298.64 kg) — the weight the aero tables and
+     * this inertia tensor were published at, used by the model-validation tests:
      * Ixx = 9,496 slug-ft^2, Iyy = 55,814 slug-ft^2, Izz = 63,100 slug-ft^2, Ixz = 982 slug-ft^2.
+     * The flyable F-16C uses its real empty weight via create() / FuelSystem.
      */
     static constexpr MassProperties create_clean_f16() noexcept {
-        return create(aircraft::AircraftType::F16_FIGHTING_FALCON);
+        return MassProperties(9298.64, 12875.0, 75674.0, 85552.0, 1331.0);
     }
 
     constexpr void update_matrices() noexcept {

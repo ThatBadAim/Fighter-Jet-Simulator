@@ -25,3 +25,6 @@ Makefile.cmake
 
 # Graphify cache
 graphify-out/cache/
+
+# Scratch directory
+scratch/

@@ -1,6 +1,6 @@
 CXX ?= g++
-CXXFLAGS ?= -std=c++20 -O3 -Wall -Wextra -Wpedantic -march=native -Iinclude
-LDFLAGS ?= -lSDL3 -lepoxy -lGL
+CXXFLAGS ?= -std=c++20 -O3 -Wall -Wextra -Wpedantic -march=native -pthread -Iinclude
+LDFLAGS ?= -lSDL3 -lepoxy -lGL -pthread
 BIN_DIR = bin
 SRC_TEST_DIR = tests
 
@@ -11,7 +11,9 @@ TESTS = test_atmosphere test_ballistic test_gyroscopic test_performance \
         test_config_persistence test_input_pipeline \
         test_camera_rig test_hud_collimation test_hud_clipping test_flight_instruments \
         test_render_pipeline test_propulsion test_landing_gear test_compressibility test_integrated_flight test_throttle_control test_performance_envelope \
-        test_terrain_field test_terrain_render
+        test_terrain_field test_terrain_render test_ground_collision test_ofc_handover test_ofc_closed_loop \
+        test_aircraft_specs test_multi_aircraft_performance test_model_glb \
+        test_user_settings test_menu_navigation test_render_fidelity test_thread_pool
 
 TARGETS = $(addprefix $(BIN_DIR)/, $(TESTS))
 
@@ -101,6 +103,36 @@ test_terrain_field: $(BIN_DIR)/test_terrain_field
 test_terrain_render: $(BIN_DIR)/test_terrain_render
 	./$(BIN_DIR)/test_terrain_render
 
+test_ground_collision: $(BIN_DIR)/test_ground_collision
+	./$(BIN_DIR)/test_ground_collision
+
+test_ofc_handover: $(BIN_DIR)/test_ofc_handover
+	./$(BIN_DIR)/test_ofc_handover
+
+test_ofc_closed_loop: $(BIN_DIR)/test_ofc_closed_loop
+	./$(BIN_DIR)/test_ofc_closed_loop
+
+test_aircraft_specs: $(BIN_DIR)/test_aircraft_specs
+	./$(BIN_DIR)/test_aircraft_specs
+
+test_multi_aircraft_performance: $(BIN_DIR)/test_multi_aircraft_performance
+	./$(BIN_DIR)/test_multi_aircraft_performance
+
+test_model_glb: $(BIN_DIR)/test_model_glb
+	./$(BIN_DIR)/test_model_glb
+
+test_user_settings: $(BIN_DIR)/test_user_settings
+	./$(BIN_DIR)/test_user_settings
+
+test_menu_navigation: $(BIN_DIR)/test_menu_navigation
+	./$(BIN_DIR)/test_menu_navigation
+
+test_render_fidelity: $(BIN_DIR)/test_render_fidelity
+	./$(BIN_DIR)/test_render_fidelity
+
+test_thread_pool: $(BIN_DIR)/test_thread_pool
+	./$(BIN_DIR)/test_thread_pool
+
 test_propulsion: $(BIN_DIR)/test_propulsion
 	./$(BIN_DIR)/test_propulsion
 
@@ -144,12 +176,22 @@ run_all: all
 	@./$(BIN_DIR)/test_render_pipeline
 	@./$(BIN_DIR)/test_terrain_field
 	@./$(BIN_DIR)/test_terrain_render
+	@./$(BIN_DIR)/test_ground_collision
+	@./$(BIN_DIR)/test_ofc_handover
+	@./$(BIN_DIR)/test_ofc_closed_loop
 	@./$(BIN_DIR)/test_propulsion
 	@./$(BIN_DIR)/test_landing_gear
 	@./$(BIN_DIR)/test_compressibility
 	@./$(BIN_DIR)/test_integrated_flight
 	@./$(BIN_DIR)/test_throttle_control
 	@./$(BIN_DIR)/test_performance_envelope
+	@./$(BIN_DIR)/test_aircraft_specs
+	@./$(BIN_DIR)/test_multi_aircraft_performance
+	@./$(BIN_DIR)/test_model_glb
+	@./$(BIN_DIR)/test_user_settings
+	@./$(BIN_DIR)/test_menu_navigation
+	@./$(BIN_DIR)/test_render_fidelity
+	@./$(BIN_DIR)/test_thread_pool
 	@echo "================ All Tests Completed Successfully! ================"
 
 clean:

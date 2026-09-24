@@ -2,45 +2,84 @@
 
 #include "fastjet/graphics/gl_common.hpp"
 #include "fastjet/graphics/shader.hpp"
+#include "fastjet/graphics/menu_font.hpp"
 #include "fastjet/aircraft/aircraft_type.hpp"
 #include "fastjet/aircraft/aircraft_config.hpp"
+#include "fastjet/ui/menu_state.hpp"
+#include "fastjet/ui/theme.hpp"
+#include "fastjet/input/signal_conditioner.hpp"
+#include "fastjet/input/input_config.hpp"
+#include "fastjet/input/input_manager.hpp"
 #include <vector>
 #include <string>
 #include <cctype>
 #include <cstring>
 #include <algorithm>
+#include <cmath>
+#include <cstdio>
 
 namespace fastjet::graphics {
 
-/// @brief Vertex structure for tactical 2D menu overlay
+/// @brief Vertex structure for tactical 2D vector and font UI overlay
 struct MenuVertex {
     float pos[3];
+    float uv[2];
     float color[4];
 };
 
-/// @brief Interactive tactical in-flight Aircraft Selection Menu
+/// @brief High-utility military tactical avionics menu system
+/// Conforms to authentic avionics utility, high information density,
+/// Google Stitch tabular spatial grid, dual mouse and keyboard/HOTAS controls.
 class AircraftMenu {
 private:
     GLuint vao_triangles_ = 0;
     GLuint vbo_triangles_ = 0;
     GLuint vao_lines_     = 0;
     GLuint vbo_lines_     = 0;
+    GLuint font_tex_      = 0;
     ShaderProgram shader_;
     bool initialized_ = false;
 
-    /// Number of selectable airframes, matching aircraft::AircraftType.
+    /// Number of selectable airframes
     static constexpr int kAircraftCount = 5;
 
     bool is_open_ = false;
+    ui::MenuContext context_ = ui::MenuContext::BOOT_DISPATCH;
+    ui::MenuTab active_tab_  = ui::MenuTab::AIRFRAME_SELECT;
     int selected_index_ = 0; // [0, kAircraftCount)
 
+    // Interactive mouse state in normalized aspect coordinates
+    float mouse_ndc_x_ = -999.0f;
+    float mouse_ndc_y_ = -999.0f;
+    int hovered_aircraft_idx_ = -1;
+    int hovered_tab_idx_ = -1;
+    bool hovered_launch_btn_ = false;
+
+    // Simulation fuel selection slider [0.10 to 1.00 capacity fraction]
+    float fuel_fraction_setting_ = 1.0f;
+
+    // Throttle detent setting preview
+    float throttle_preview_val_ = 0.65f;
+
+    // Dynamic vertex buffers
     std::vector<MenuVertex> triangle_verts_;
     std::vector<MenuVertex> line_verts_;
 
+    // Palette, sourced from the shared ui::Theme tokens (see apply_theme()).
+    // Defaults are the default theme, so the menu renders correctly even if
+    // apply_theme() is never called.
+    Color4 col_bg_void, col_panel_bg, col_card_header, col_highlight_bg, col_row_alt;
+    Color4 col_border_dim, col_border_outer, col_border_bright;
+    Color4 col_title, col_accent_gold, col_text_normal, col_text_dim, col_text_bright;
+    Color4 col_active_badge, col_spec_label, col_spec_val, col_alert_red;
+    Color4 col_tab_active, col_tab_inactive, col_btn_scramble, col_btn_scramble_hov;
+
+    [[nodiscard]] static Color4 to_color(const ui::Rgba& c) noexcept { return Color4{c.r, c.g, c.b, c.a}; }
+
     void add_triangle(float x0, float y0, float x1, float y1, float x2, float y2, const Color4& col) {
-        triangle_verts_.push_back({{x0, y0, 0.0f}, {col.r, col.g, col.b, col.a}});
-        triangle_verts_.push_back({{x1, y1, 0.0f}, {col.r, col.g, col.b, col.a}});
-        triangle_verts_.push_back({{x2, y2, 0.0f}, {col.r, col.g, col.b, col.a}});
+        triangle_verts_.push_back({{x0, y0, 0.0f}, {-1.0f, -1.0f}, {col.r, col.g, col.b, col.a}});
+        triangle_verts_.push_back({{x1, y1, 0.0f}, {-1.0f, -1.0f}, {col.r, col.g, col.b, col.a}});
+        triangle_verts_.push_back({{x2, y2, 0.0f}, {-1.0f, -1.0f}, {col.r, col.g, col.b, col.a}});
     }
 
     void add_quad(float x0, float y0, float x1, float y1, const Color4& col) {
@@ -48,9 +87,20 @@ private:
         add_triangle(x0, y0, x1, y1, x0, y1, col);
     }
 
+    void add_thick_line(float x0, float y0, float x1, float y1, float thickness, const Color4& col) {
+        float dx = x1 - x0;
+        float dy = y1 - y0;
+        float len = std::sqrt(dx * dx + dy * dy);
+        if (len < 1e-6f) return;
+        float nx = -dy / len * (thickness * 0.5f);
+        float ny =  dx / len * (thickness * 0.5f);
+        add_triangle(x0 + nx, y0 + ny, x0 - nx, y0 - ny, x1 - nx, y1 - ny, col);
+        add_triangle(x0 + nx, y0 + ny, x1 - nx, y1 - ny, x1 + nx, y1 + ny, col);
+    }
+
     void add_line(float x0, float y0, float x1, float y1, const Color4& col) {
-        line_verts_.push_back({{x0, y0, 0.0f}, {col.r, col.g, col.b, col.a}});
-        line_verts_.push_back({{x1, y1, 0.0f}, {col.r, col.g, col.b, col.a}});
+        line_verts_.push_back({{x0, y0, 0.0f}, {-1.0f, -1.0f}, {col.r, col.g, col.b, col.a}});
+        line_verts_.push_back({{x1, y1, 0.0f}, {-1.0f, -1.0f}, {col.r, col.g, col.b, col.a}});
     }
 
     void add_rect_outline(float x0, float y0, float x1, float y1, const Color4& col) {
@@ -60,128 +110,34 @@ private:
         add_line(x0, y1, x0, y0, col);
     }
 
-    void draw_char(char raw_c, float cx, float cy, float scale, const Color4& col) {
-        const char c = static_cast<char>(std::toupper(static_cast<unsigned char>(raw_c)));
-        const float w = 0.65f * scale;
-        const float h = 1.0f * scale;
-        const float l = cx - w * 0.5f;
-        const float r = cx + w * 0.5f;
-        const float b = cy - h * 0.5f;
-        const float m = cy;
-        const float t = cy + h * 0.5f;
-
-        auto h_top  = [&]() { add_line(l, t, r, t, col); };
-        auto h_midl = [&]() { add_line(l, m, cx, m, col); };
-        auto h_midr = [&]() { add_line(cx, m, r, m, col); };
-        auto h_mid  = [&]() { add_line(l, m, r, m, col); };
-        auto h_bot  = [&]() { add_line(l, b, r, b, col); };
-
-        auto v_tl = [&]() { add_line(l, m, l, t, col); };
-        auto v_tr = [&]() { add_line(r, m, r, t, col); };
-        auto v_bl = [&]() { add_line(l, b, l, m, col); };
-        auto v_br = [&]() { add_line(r, b, r, m, col); };
-        auto v_l  = [&]() { add_line(l, b, l, t, col); };
-        auto v_r  = [&]() { add_line(r, b, r, t, col); };
-
-        auto v_c  = [&]() { add_line(cx, b, cx, t, col); };
-        auto v_bc = [&]() { add_line(cx, b, cx, m, col); };
-
-        auto d_tlc = [&]() { add_line(l, t, cx, m, col); };
-        auto d_trc = [&]() { add_line(r, t, cx, m, col); };
-        auto d_blc = [&]() { add_line(l, b, cx, m, col); };
-        auto d_brc = [&]() { add_line(r, b, cx, m, col); };
-
-        switch (c) {
-            case '0': h_top(); h_bot(); v_l(); v_r(); add_line(r, t, l, b, col); break;
-            case '1': add_line(cx - 0.25f * w, t - 0.25f * h, cx, t, col); v_c(); add_line(cx - 0.35f * w, b, cx + 0.35f * w, b, col); break;
-            case '2': h_top(); v_tr(); h_mid(); v_bl(); h_bot(); break;
-            case '3': h_top(); v_tr(); h_midr(); v_br(); h_bot(); break;
-            case '4': v_tl(); h_mid(); v_r(); break;
-            case '5': h_top(); v_tl(); h_mid(); v_br(); h_bot(); break;
-            case '6': h_top(); v_l(); h_mid(); v_br(); h_bot(); break;
-            case '7': h_top(); v_tr(); v_br(); break;
-            case '8': h_top(); h_mid(); h_bot(); v_l(); v_r(); break;
-            case '9': h_top(); v_tl(); h_mid(); v_r(); h_bot(); break;
-
-            case 'A': h_top(); v_l(); v_r(); h_mid(); break;
-            case 'B': v_l(); h_top(); h_mid(); h_bot(); add_line(r, m + 0.1f * h, r, t - 0.1f * h, col); add_line(r, b + 0.1f * h, r, m - 0.1f * h, col); break;
-            case 'C': h_top(); v_l(); h_bot(); break;
-            case 'D': v_l(); h_top(); h_bot(); add_line(r, b + 0.15f * h, r, t - 0.15f * h, col); break;
-            case 'E': h_top(); v_l(); h_midl(); h_bot(); break;
-            case 'F': h_top(); v_l(); h_midl(); break;
-            case 'G': h_top(); v_l(); h_bot(); v_br(); h_midr(); break;
-            case 'H': v_l(); v_r(); h_mid(); break;
-            case 'I': h_top(); h_bot(); v_c(); break;
-            case 'J': v_r(); h_bot(); v_bl(); break;
-            case 'K': v_l(); d_trc(); d_brc(); break;
-            case 'L': v_l(); h_bot(); break;
-            case 'M': v_l(); v_r(); d_tlc(); d_trc(); break;
-            case 'N': v_l(); v_r(); add_line(l, t, r, b, col); break;
-            case 'O': h_top(); h_bot(); v_l(); v_r(); break;
-            case 'P': v_l(); h_top(); v_tr(); h_mid(); break;
-            case 'Q': h_top(); h_bot(); v_l(); v_r(); add_line(cx, m - 0.1f * h, r, b - 0.1f * h, col); break;
-            case 'R': v_l(); h_top(); v_tr(); h_mid(); d_brc(); break;
-            case 'S': h_top(); v_tl(); h_mid(); v_br(); h_bot(); break;
-            case 'T': h_top(); v_c(); break;
-            case 'U': v_l(); v_r(); h_bot(); break;
-            case 'V': add_line(l, t, cx, b, col); add_line(r, t, cx, b, col); break;
-            case 'W': v_l(); v_r(); d_blc(); d_brc(); break;
-            case 'X': add_line(l, t, r, b, col); add_line(l, b, r, t, col); break;
-            case 'Y': d_tlc(); d_trc(); v_bc(); break;
-            case 'Z': h_top(); add_line(r, t, l, b, col); h_bot(); break;
-
-            case '-': h_mid(); break;
-            case '+': h_mid(); v_c(); break;
-            case '.': add_line(cx - 0.05f * scale, b, cx + 0.05f * scale, b, col); break;
-            case ':':
-                add_line(cx - 0.04f * scale, m + 0.2f * scale, cx + 0.04f * scale, m + 0.2f * scale, col);
-                add_line(cx - 0.04f * scale, m - 0.2f * scale, cx + 0.04f * scale, m - 0.2f * scale, col);
-                break;
-            case '/': add_line(l, b, r, t, col); break;
-            case '\\': add_line(l, t, r, b, col); break;
-            case '[': h_top(); h_bot(); v_l(); break;
-            case ']': h_top(); h_bot(); v_r(); break;
-            case '>': add_line(l, t, r, m, col); add_line(r, m, l, b, col); break;
-            case '<': add_line(r, t, l, m, col); add_line(l, m, r, b, col); break;
-            case '(': add_line(r, t, l, m, col); add_line(l, m, r, b, col); break;
-            case ')': add_line(l, t, r, m, col); add_line(r, m, l, b, col); break;
-            case '=':
-                add_line(l, m + 0.15f * scale, r, m + 0.15f * scale, col);
-                add_line(l, m - 0.15f * scale, r, m - 0.15f * scale, col);
-                break;
-            case ',': add_line(cx, b + 0.05f * scale, cx - 0.08f * scale, b - 0.1f * scale, col); break;
-            case '|': v_c(); break;
-            case '_': h_bot(); break;
-            case ' ':
-            default:
-                break;
-        }
+    void add_corner_brackets(float x0, float y0, float x1, float y1, float len, const Color4& col) {
+        add_line(x0, y1, x0 + len, y1, col);
+        add_line(x0, y1, x0, y1 - len, col);
+        add_line(x1, y1, x1 - len, y1, col);
+        add_line(x1, y1, x1, y1 - len, col);
+        add_line(x0, y0, x0 + len, y0, col);
+        add_line(x0, y0, x0, y0 + len, col);
+        add_line(x1, y0, x1 - len, y0, col);
+        add_line(x1, y0, x1, y0 + len, col);
     }
 
-    /// @brief Per-character advance width, as a multiple of the cell scale.
-    ///
-    /// The glyph cell is a fixed-width skeleton, but advancing every character
-    /// by the same amount leaves narrow characters swimming in white space and
-    /// makes the text colour visibly uneven. Narrow glyphs therefore claim less
-    /// of the line than wide ones, which is what proportional spacing buys.
-    [[nodiscard]] static float char_advance(char raw_c) noexcept {
-        const char c = static_cast<char>(std::toupper(static_cast<unsigned char>(raw_c)));
-        switch (c) {
-            case 'I': case '1': case '|': case ':': case '.': case ',':
-                return 0.38f;
-            case 'J': case 'L': case 'T': case 'Y': case '[': case ']':
-            case '(': case ')': case '/': case '\\': case '-':
-                return 0.68f;
-            case 'M': case 'W':
-                return 1.02f;
-            case ' ':
-                return 0.55f;
-            default:
-                return 0.82f;
-        }
+    void add_textured_quad(float x0, float y0, float x1, float y1,
+                           float u0, float v0, float u1, float v1,
+                           const Color4& col) {
+        triangle_verts_.push_back({{x0, y0, 0.0f}, {u0, v1}, {col.r, col.g, col.b, col.a}});
+        triangle_verts_.push_back({{x1, y0, 0.0f}, {u1, v1}, {col.r, col.g, col.b, col.a}});
+        triangle_verts_.push_back({{x1, y1, 0.0f}, {u1, v0}, {col.r, col.g, col.b, col.a}});
+
+        triangle_verts_.push_back({{x0, y0, 0.0f}, {u0, v1}, {col.r, col.g, col.b, col.a}});
+        triangle_verts_.push_back({{x1, y1, 0.0f}, {u1, v0}, {col.r, col.g, col.b, col.a}});
+        triangle_verts_.push_back({{x0, y1, 0.0f}, {u0, v0}, {col.r, col.g, col.b, col.a}});
     }
 
-    /// @brief Width of a rendered string, for centring and right-alignment.
+    [[nodiscard]] static float char_advance(char c) noexcept {
+        const MenuGlyph* g = find_menu_glyph(static_cast<unsigned char>(c));
+        return g ? g->advance : 0.5f;
+    }
+
     [[nodiscard]] static float measure_string(const char* str, float scale) noexcept {
         if (!str || !*str) return 0.0f;
         float w = 0.0f;
@@ -191,32 +147,62 @@ private:
         return w;
     }
 
-    void draw_string(const char* str, float start_x, float y, float scale, const Color4& col) {
-        if (!str) return;
-        float x = start_x;
-        while (*str) {
-            const float advance = char_advance(*str) * scale;
-            // Centre each glyph inside the slice of the line it claims, so a
-            // narrow character sits evenly between its neighbours.
-            draw_char(*str, x + advance * 0.5f, y, scale, col);
-            x += advance;
-            ++str;
+    void draw_string(const char* str, float start_x, float cy, float scale, const Color4& col) {
+        if (!str || !*str) return;
+        const float baseline_y = cy - 0.35f * scale;
+        float pen_x = start_x;
+        for (const char* p = str; *p; ++p) {
+            const MenuGlyph* g = find_menu_glyph(static_cast<unsigned char>(*p));
+            if (!g) continue;
+            if (g->w > 0.0f && g->h > 0.0f) {
+                float gx0 = pen_x + g->bearing_x * scale;
+                float gx1 = gx0 + g->w * scale;
+                float gy1 = baseline_y + g->bearing_y * scale;
+                float gy0 = gy1 - g->h * scale;
+                add_textured_quad(gx0, gy0, gx1, gy1, g->u0, g->v0, g->u1, g->v1, col);
+            }
+            pen_x += g->advance * scale;
         }
     }
 
-    void draw_string_centered(const char* str, float center_x, float y, float scale, const Color4& col) {
+    void draw_string_centered(const char* str, float center_x, float cy, float scale, const Color4& col) {
         if (!str || !*str) return;
-        draw_string(str, center_x - measure_string(str, scale) * 0.5f, y, scale, col);
+        draw_string(str, center_x - measure_string(str, scale) * 0.5f, cy, scale, col);
     }
 
-    /// @brief Draws a string ending at right_x, for right-aligned badges.
-    void draw_string_right(const char* str, float right_x, float y, float scale, const Color4& col) {
+    void draw_string_right(const char* str, float right_x, float cy, float scale, const Color4& col) {
         if (!str || !*str) return;
-        draw_string(str, right_x - measure_string(str, scale), y, scale, col);
+        draw_string(str, right_x - measure_string(str, scale), cy, scale, col);
     }
 
 public:
-    AircraftMenu() = default;
+    AircraftMenu() { apply_theme(ui::build_theme(ui::AccessibilitySettings{})); }
+
+    /// @brief Maps the shared design tokens onto this menu's colour roles.
+    void apply_theme(const ui::Theme& theme) noexcept {
+        const ui::Palette& p = theme.palette;
+        col_bg_void          = to_color(p.surface_void);
+        col_panel_bg         = to_color(p.surface_panel);
+        col_card_header      = to_color(p.surface_header);
+        col_highlight_bg     = to_color(p.selection);
+        col_row_alt          = to_color(p.surface_row_alt);
+        col_border_dim       = to_color(p.border_subtle);
+        col_border_outer     = to_color(p.border_strong);
+        col_border_bright    = to_color(p.border_bright);
+        col_title            = to_color(p.text_primary);
+        col_accent_gold      = to_color(p.highlight);
+        col_text_normal      = to_color(p.text_secondary);
+        col_text_dim         = to_color(p.text_muted);
+        col_text_bright      = to_color(p.accent);
+        col_active_badge     = to_color(p.success);
+        col_spec_label       = to_color(p.text_label);
+        col_spec_val         = to_color(p.text_primary);
+        col_alert_red        = to_color(p.danger);
+        col_tab_active       = to_color(p.accent_strong);
+        col_tab_inactive     = to_color(p.surface_sunken);
+        col_btn_scramble     = to_color(p.success_fill);
+        col_btn_scramble_hov = to_color(p.success_fill_hover);
+    }
     ~AircraftMenu() { destroy(); }
 
     bool init() {
@@ -225,10 +211,13 @@ public:
         const char* vert_src = R"(
             #version 330 core
             layout (location = 0) in vec3 aPos;
-            layout (location = 1) in vec4 aColor;
+            layout (location = 1) in vec2 aUV;
+            layout (location = 2) in vec4 aColor;
             uniform mat4 uProjection;
+            out vec2 vUV;
             out vec4 vColor;
             void main() {
+                vUV = aUV;
                 vColor = aColor;
                 gl_Position = uProjection * vec4(aPos, 1.0);
             }
@@ -236,10 +225,17 @@ public:
 
         const char* frag_src = R"(
             #version 330 core
+            in vec2 vUV;
             in vec4 vColor;
+            uniform sampler2D uFontTex;
             out vec4 FragColor;
             void main() {
-                FragColor = vColor;
+                if (vUV.x < 0.0) {
+                    FragColor = vColor;
+                } else {
+                    float alpha = texture(uFontTex, vUV).r;
+                    FragColor = vec4(vColor.rgb, vColor.a * alpha);
+                }
             }
         )";
 
@@ -247,32 +243,50 @@ public:
             return false;
         }
 
-        // Triangle mesh setup
         glGenVertexArrays(1, &vao_triangles_);
         glGenBuffers(1, &vbo_triangles_);
         glBindVertexArray(vao_triangles_);
         glBindBuffer(GL_ARRAY_BUFFER, vbo_triangles_);
         glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(MenuVertex), (void*)offsetof(MenuVertex, pos));
         glEnableVertexAttribArray(0);
-        glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, sizeof(MenuVertex), (void*)offsetof(MenuVertex, color));
+        glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(MenuVertex), (void*)offsetof(MenuVertex, uv));
         glEnableVertexAttribArray(1);
+        glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, sizeof(MenuVertex), (void*)offsetof(MenuVertex, color));
+        glEnableVertexAttribArray(2);
 
-        // Line mesh setup
         glGenVertexArrays(1, &vao_lines_);
         glGenBuffers(1, &vbo_lines_);
         glBindVertexArray(vao_lines_);
         glBindBuffer(GL_ARRAY_BUFFER, vbo_lines_);
         glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(MenuVertex), (void*)offsetof(MenuVertex, pos));
         glEnableVertexAttribArray(0);
-        glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, sizeof(MenuVertex), (void*)offsetof(MenuVertex, color));
+        glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(MenuVertex), (void*)offsetof(MenuVertex, uv));
         glEnableVertexAttribArray(1);
+        glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, sizeof(MenuVertex), (void*)offsetof(MenuVertex, color));
+        glEnableVertexAttribArray(2);
 
         glBindVertexArray(0);
+
+        // Upload anti-aliased TrueType font atlas
+        std::vector<uint8_t> atlas_pixels(kMenuFontTexW * kMenuFontTexH, 0);
+        decode_menu_font_atlas(atlas_pixels.data());
+
+        glGenTextures(1, &font_tex_);
+        glBindTexture(GL_TEXTURE_2D, font_tex_);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RED, kMenuFontTexW, kMenuFontTexH, 0, GL_RED, GL_UNSIGNED_BYTE, atlas_pixels.data());
+        glBindTexture(GL_TEXTURE_2D, 0);
+
         initialized_ = true;
         return true;
     }
 
     void destroy() {
+        if (font_tex_)      { glDeleteTextures(1, &font_tex_); font_tex_ = 0; }
         if (vbo_triangles_) { glDeleteBuffers(1, &vbo_triangles_); vbo_triangles_ = 0; }
         if (vao_triangles_) { glDeleteVertexArrays(1, &vao_triangles_); vao_triangles_ = 0; }
         if (vbo_lines_)     { glDeleteBuffers(1, &vbo_lines_); vbo_lines_ = 0; }
@@ -282,9 +296,22 @@ public:
     }
 
     bool is_open() const noexcept { return is_open_; }
+    ui::MenuContext context() const noexcept { return context_; }
+    ui::MenuTab active_tab() const noexcept { return active_tab_; }
+    void set_tab(ui::MenuTab tab) noexcept { active_tab_ = tab; }
+
+    void open_as_dispatch(aircraft::AircraftType current) noexcept {
+        is_open_ = true;
+        context_ = ui::MenuContext::BOOT_DISPATCH;
+        active_tab_ = ui::MenuTab::AIRFRAME_SELECT;
+        selected_index_ = static_cast<int>(current);
+        if (selected_index_ < 0 || selected_index_ >= kAircraftCount) selected_index_ = 0;
+    }
 
     void open(aircraft::AircraftType current) noexcept {
         is_open_ = true;
+        context_ = ui::MenuContext::IN_FLIGHT_RECONFIG;
+        active_tab_ = ui::MenuTab::AIRFRAME_SELECT;
         selected_index_ = static_cast<int>(current);
         if (selected_index_ < 0 || selected_index_ >= kAircraftCount) selected_index_ = 0;
     }
@@ -309,6 +336,17 @@ public:
         selected_index_ = (selected_index_ + 1) % kAircraftCount;
     }
 
+    void next_tab() noexcept {
+        int next = (static_cast<int>(active_tab_) + 1) % static_cast<int>(ui::MenuTab::COUNT);
+        active_tab_ = static_cast<ui::MenuTab>(next);
+    }
+
+    void prev_tab() noexcept {
+        int count = static_cast<int>(ui::MenuTab::COUNT);
+        int prev = (static_cast<int>(active_tab_) + count - 1) % count;
+        active_tab_ = static_cast<ui::MenuTab>(prev);
+    }
+
     void select_index(int idx) noexcept {
         if (idx >= 0 && idx < kAircraftCount) {
             selected_index_ = idx;
@@ -321,88 +359,186 @@ public:
         return static_cast<aircraft::AircraftType>(selected_index_);
     }
 
-    void render(float aspect, aircraft::AircraftType active_aircraft) {
+    float fuel_fraction() const noexcept { return fuel_fraction_setting_; }
+    void set_fuel_fraction(float f) noexcept { fuel_fraction_setting_ = std::clamp(f, 0.10f, 1.00f); }
+
+    /// @brief Update mouse position in window pixels
+    void update_mouse(int mouse_x, int mouse_y, int win_w, int win_h, float aspect) noexcept {
+        if (win_w <= 0 || win_h <= 0) return;
+        // Transform screen coords [0, win_w], [0, win_h] into NDC aspect space [-aspect, +aspect], [-1.0, +1.0]
+        mouse_ndc_x_ = (static_cast<float>(mouse_x) / static_cast<float>(win_w) * 2.0f - 1.0f) * aspect;
+        mouse_ndc_y_ = 1.0f - static_cast<float>(mouse_y) / static_cast<float>(win_h) * 2.0f;
+    }
+
+    /// @brief Handle mouse click on interactive menu buttons
+    /// @return true if a launch/commit fly action was triggered
+    bool handle_click() noexcept {
+        if (!is_open_) return false;
+
+        // 1. Check top tabs
+        if (hovered_tab_idx_ >= 0 && hovered_tab_idx_ < static_cast<int>(ui::MenuTab::COUNT)) {
+            active_tab_ = static_cast<ui::MenuTab>(hovered_tab_idx_);
+            return false;
+        }
+
+        // 2. Check aircraft list items
+        if (hovered_aircraft_idx_ >= 0 && hovered_aircraft_idx_ < kAircraftCount) {
+            selected_index_ = hovered_aircraft_idx_;
+            return false;
+        }
+
+        // 3. Check commit/launch button
+        if (hovered_launch_btn_) {
+            close();
+            return true;
+        }
+
+        return false;
+    }
+
+    void render(float aspect, aircraft::AircraftType active_aircraft,
+                const input::ControllerProfile* ctrl_profile = nullptr,
+                const input::InputManager* input_mgr = nullptr) {
         if (!initialized_ || !is_open_) return;
 
         triangle_verts_.clear();
         line_verts_.clear();
 
-        // ---------------------------------------------------------------------
-        // Color Palette (Tactical Glass & Avionics HUD)
-        // ---------------------------------------------------------------------
-        const Color4 col_bg_glass     {0.04f, 0.07f, 0.11f, 0.88f}; // Dark semi-translucent glass
-        const Color4 col_card_bg     {0.02f, 0.05f, 0.08f, 0.75f}; // Sub-card backdrop
-        const Color4 col_highlight_bg{0.08f, 0.22f, 0.18f, 0.75f}; // Highlighted entry fill
-
-        const Color4 col_border_outer{0.15f, 0.50f, 0.60f, 0.90f}; // Outer cyan bezel
-        const Color4 col_border_inner{0.10f, 0.35f, 0.45f, 0.60f}; // Inner bezel
-        const Color4 col_title       {0.25f, 1.00f, 0.80f, 1.00f}; // Cyan/mint glowing title
-        const Color4 col_text_dim    {0.45f, 0.65f, 0.65f, 0.85f}; // Dim cyan text
-        const Color4 col_text_bright {0.20f, 1.00f, 0.40f, 1.00f}; // Bright tactical green
-        const Color4 col_active_badge{1.00f, 0.75f, 0.10f, 1.00f}; // Amber active badge
-        const Color4 col_spec_label  {0.35f, 0.80f, 0.95f, 1.00f}; // Cyan spec field labels
-        const Color4 col_spec_val    {0.90f, 0.95f, 0.95f, 1.00f}; // Crisp white/ice values
-
-        // Modal Frame Coordinates
-        const float modal_w = std::min(1.80f, aspect * 1.70f);
-        const float modal_h = 1.48f;
+        // Modal Frame Coordinates: full-density tactical HUD canvas
+        const float modal_w = std::min(1.84f, aspect * 1.76f);
+        const float modal_h = 1.52f;
         const float x0 = -modal_w * 0.5f;
         const float x1 =  modal_w * 0.5f;
         const float y0 = -modal_h * 0.5f;
         const float y1 =  modal_h * 0.5f;
 
-        // 1. Modal Glass Backdrop
-        add_quad(x0, y0, x1, y1, col_bg_glass);
+        // Reset hover detection for this frame
+        hovered_tab_idx_ = -1;
+        hovered_aircraft_idx_ = -1;
+        hovered_launch_btn_ = false;
 
-        // 2. Bezel and Double Frame Outlines
+        // 1. Outer Deep Canvas Backdrop & Clean Aerospace Double Bezel Frame
+        add_quad(x0, y0, x1, y1, col_bg_void);
         add_rect_outline(x0, y0, x1, y1, col_border_outer);
-        add_rect_outline(x0 + 0.012f, y0 + 0.012f, x1 - 0.012f, y1 - 0.012f, col_border_inner);
+        add_rect_outline(x0 + 0.008f, y0 + 0.008f, x1 - 0.008f, y1 - 0.008f, col_border_dim);
+        add_corner_brackets(x0, y0, x1, y1, 0.06f, col_border_bright);
 
-        // Corner Chamfer / Tactical Brackets
-        const float c_len = 0.05f;
-        add_line(x0 - 0.02f, y1, x0 + c_len, y1, col_title);
-        add_line(x0, y1 + 0.02f, x0, y1 - c_len, col_title);
-        add_line(x1 + 0.02f, y1, x1 - c_len, y1, col_title);
-        add_line(x1, y1 + 0.02f, x1, y1 - c_len, col_title);
-        add_line(x0 - 0.02f, y0, x0 + c_len, y0, col_title);
-        add_line(x0, y0 - 0.02f, x0, y0 + c_len, col_title);
-        add_line(x1 + 0.02f, y0, x1 - c_len, y0, col_title);
-        add_line(x1, y0 - 0.02f, x1, y0 + c_len, col_title);
-
-        // 3. Header Bar
-        const float header_y = y1 - 0.12f;
+        // 2. Persistent Top Tactical Header (Operational Telemetry & Tab Bar)
+        const float header_y = y1 - 0.14f;
+        add_quad(x0 + 0.010f, header_y, x1 - 0.010f, y1 - 0.010f, col_card_header);
         add_line(x0, header_y, x1, header_y, col_border_outer);
-        add_line(x0, header_y - 0.005f, x1, header_y - 0.005f, col_border_inner);
-        draw_string_centered("FAST JET SIMULATOR : AIRCRAFT SELECT", 0.0f, y1 - 0.065f, 0.030f, col_title);
+        add_line(x0, header_y - 0.003f, x1, header_y - 0.003f, col_border_dim);
 
-        // 4. Footer Bar
+        // Title and Mode indicator
+        const char* mode_tag = (context_ == ui::MenuContext::BOOT_DISPATCH)
+                             ? "SYS STATUS: PRE-FLIGHT DISPATCH READINESS"
+                             : "SYS STATUS: IN-FLIGHT TACTICAL RECONFIG [M]";
+        draw_string("FAST JET SIMULATOR", x0 + 0.035f, y1 - 0.052f, 0.026f, col_title);
+        draw_string(mode_tag, x0 + 0.035f, y1 - 0.096f, 0.015f, col_text_dim);
+
+        // Render Clean Aerospace Tabs [AIRFRAME] [ENVELOPE] [CONTROLS] [SORTIE]
+        const char* tab_names[] = {
+            "[F1] AIRFRAME",
+            "[F2] ENVELOPE",
+            "[F3] CONTROLS",
+            "[F4] SORTIE"
+        };
+        const int tab_count = 4;
+        const float tab_total_w = 1.04f;
+        const float tab_w = tab_total_w / static_cast<float>(tab_count);
+        const float tab_start_x = x1 - tab_total_w - 0.025f;
+        const float tab_y0 = header_y + 0.018f;
+        const float tab_y1 = y1 - 0.025f;
+
+        for (int t = 0; t < tab_count; ++t) {
+            const float tx0 = tab_start_x + static_cast<float>(t) * tab_w;
+            const float tx1 = tx0 + tab_w - 0.008f;
+            const bool is_active_tab = (static_cast<int>(active_tab_) == t);
+
+            // Hover detection
+            const bool is_hovered = (mouse_ndc_x_ >= tx0 && mouse_ndc_x_ <= tx1 &&
+                                     mouse_ndc_y_ >= tab_y0 && mouse_ndc_y_ <= tab_y1);
+            if (is_hovered) hovered_tab_idx_ = t;
+
+            const Color4 fill_col = is_active_tab ? col_tab_active
+                                  : (is_hovered ? col_highlight_bg : col_tab_inactive);
+            const Color4 bdr_col  = is_active_tab ? col_border_bright
+                                  : (is_hovered ? col_text_bright : col_border_dim);
+            const Color4 txt_col  = is_active_tab ? col_spec_val
+                                  : (is_hovered ? col_title : col_text_dim);
+
+            add_quad(tx0, tab_y0, tx1, tab_y1, fill_col);
+            add_rect_outline(tx0, tab_y0, tx1, tab_y1, bdr_col);
+            draw_string_centered(tab_names[t], (tx0 + tx1) * 0.5f, (tab_y0 + tab_y1) * 0.5f, 0.016f, txt_col);
+        }
+
+        // 3. Persistent Operational Footer Bar
         const float footer_y = y0 + 0.11f;
+        add_quad(x0 + 0.010f, y0 + 0.010f, x1 - 0.010f, footer_y, col_card_header);
         add_line(x0, footer_y, x1, footer_y, col_border_outer);
-        add_line(x0, footer_y + 0.005f, x1, footer_y + 0.005f, col_border_inner);
-        draw_string_centered("UP/DOWN OR W/S: NAVIGATE  |  ENTER OR 1-5: FLY  |  ESC/M: CLOSE", 
-                             0.0f, y0 + 0.055f, 0.020f, col_title);
+        add_line(x0, footer_y + 0.003f, x1, footer_y + 0.003f, col_border_dim);
 
-        // 5. Column Layout
-        // Split Left (Aircraft List) and Right (Spec Sheet)
-        const float split_x = x0 + modal_w * 0.44f;
-        add_line(split_x, header_y, split_x, footer_y, col_border_inner);
+        // Persistent Hotkey Navigation Guide
+        draw_string("1-5/ARROWS: SELECT  |  TAB: SWITCH PAGE  |  ESC/M: DISMISS",
+                    x0 + 0.035f, y0 + 0.055f, 0.016f, col_text_dim);
 
-        // Shared spacing scale. Hoisted so the panel rhythm can be tuned in one
-        // place rather than by hunting inline offsets.
-        const float pad_s = 0.015f;
-        const float pad_m = 0.030f;
-        const float pad_l = 0.055f;
+        // Launch / Commit Flight Action Button
+        const float btn_w = 0.44f;
+        const float btn_h = 0.068f;
+        const float btn_x1 = x1 - 0.025f;
+        const float btn_x0 = btn_x1 - btn_w;
+        const float btn_y0 = y0 + 0.020f;
+        const float btn_y1 = btn_y0 + btn_h;
 
-        // Type ramp. Each step is a clear size change: a label and its value
-        // differing by a thousandth of a unit reads as an accident, not a
-        // hierarchy.
-        const float type_item     = 0.023f;
-        const float type_subtitle = 0.014f;
-        const float type_badge    = 0.016f;
-        const float type_spec_lbl = 0.013f;
-        const float type_spec_val = 0.018f;
+        const bool btn_hover = (mouse_ndc_x_ >= btn_x0 && mouse_ndc_x_ <= btn_x1 &&
+                                mouse_ndc_y_ >= btn_y0 && mouse_ndc_y_ <= btn_y1);
+        if (btn_hover) hovered_launch_btn_ = true;
 
-        // --- LEFT COLUMN: AIRCRAFT LIST ---
+        const Color4 btn_fill = btn_hover ? col_btn_scramble_hov : col_btn_scramble;
+        const Color4 btn_bdr  = btn_hover ? col_active_badge : col_text_bright;
+        add_quad(btn_x0, btn_y0, btn_x1, btn_y1, btn_fill);
+        add_rect_outline(btn_x0, btn_y0, btn_x1, btn_y1, btn_bdr);
+        add_rect_outline(btn_x0 + 0.003f, btn_y0 + 0.003f, btn_x1 - 0.003f, btn_y1 - 0.003f, col_title);
+
+        const char* btn_label = (context_ == ui::MenuContext::BOOT_DISPATCH)
+                              ? "[ENTER] COMMIT & SCRAMBLE"
+                              : "[ENTER] COMMIT AIRFRAME";
+        draw_string_centered(btn_label, (btn_x0 + btn_x1) * 0.5f, (btn_y0 + btn_y1) * 0.5f, 0.018f, col_spec_val);
+
+        // 4. Content Area Layout
+        const float content_top = header_y - 0.020f;
+        const float content_bot = footer_y + 0.020f;
+
+        // Render Active Tab Pane
+        switch (active_tab_) {
+            case ui::MenuTab::AIRFRAME_SELECT:
+            default:
+                render_airframe_tab(x0, x1, content_top, content_bot, active_aircraft);
+                break;
+            case ui::MenuTab::FLIGHT_ENVELOPE:
+                render_envelope_tab(x0, x1, content_top, content_bot);
+                break;
+            case ui::MenuTab::HARDWARE_CALIBRATION:
+                render_calibration_tab(x0, x1, content_top, content_bot, ctrl_profile, input_mgr);
+                break;
+            case ui::MenuTab::SORTIE_DISPATCH:
+                render_sortie_tab(x0, x1, content_top, content_bot, active_aircraft);
+                break;
+        }
+
+        // Upload and Render Triangles & Lines
+        upload_and_draw_buffers(aspect);
+    }
+
+private:
+    void render_airframe_tab(float x0, float x1, float top, float bot, aircraft::AircraftType active_aircraft) {
+        // Split-screen: Left Column (32% airframe selector) and Right Column (68% specs & loadout)
+        const float total_w = x1 - x0;
+        const float split_x = x0 + total_w * 0.32f;
+
+        add_line(split_x, top + 0.015f, split_x, bot - 0.015f, col_border_dim);
+
+        // --- LEFT COLUMN: AIRCRAFT SELECTOR ---
         const char* aircraft_names[kAircraftCount] = {
             "F-16C FIGHTING FALCON",
             "F-15EX EAGLE II",
@@ -410,173 +546,436 @@ public:
             "F-22A RAPTOR",
             "A-10C THUNDERBOLT II"
         };
-
         const char* aircraft_subtitles[kAircraftCount] = {
-            "BLOCK 50 MULTIROLE FIGHTER",
-            "HEAVY AIR SUPERIORITY DFBW",
-            "DELTA-CANARD CAREFREE FBW",
-            "5TH-GEN STEALTH AIR DOMINANCE",
-            "CLOSE AIR SUPPORT ATTACK JET"
+            "BLOCK 50 MULTIROLE / F110-GE-129",
+            "HEAVY AIR SUPERIORITY / TWIN F110",
+            "DELTA-CANARD CAREFREE FBW / EJ200",
+            "5TH-GEN VLO AIR DOMINANCE / 2D TVC",
+            "CLOSE AIR SUPPORT TANK BUSTER / TF34"
         };
 
-        const float item_h = (header_y - footer_y - 0.06f) / static_cast<float>(kAircraftCount);
-        const float list_top = header_y - 0.03f;
+        const float pad_x = 0.020f;
+        const float list_x0 = x0 + pad_x;
+        const float list_x1 = split_x - pad_x;
+        const float list_h  = top - bot;
+        const float item_h  = list_h / static_cast<float>(kAircraftCount);
 
         for (int i = 0; i < kAircraftCount; ++i) {
-            const float item_y1 = list_top - static_cast<float>(i) * item_h;
+            const float item_y1 = top - static_cast<float>(i) * item_h;
             const float item_y0 = item_y1 - item_h;
             const float item_cy = (item_y0 + item_y1) * 0.5f;
 
             const bool is_selected = (i == selected_index_);
             const bool is_active   = (i == static_cast<int>(active_aircraft));
 
-            const float row_l = x0 + pad_m;
-            const float row_r = split_x - pad_m;
+            // Mouse hover check
+            const bool is_hovered = (mouse_ndc_x_ >= list_x0 && mouse_ndc_x_ <= list_x1 &&
+                                     mouse_ndc_y_ >= item_y0 + 0.008f && mouse_ndc_y_ <= item_y1 - 0.008f);
+            if (is_hovered) hovered_aircraft_idx_ = i;
 
             if (is_selected) {
-                // Highlight box with bright green border and tint
-                add_quad(row_l, item_y0 + pad_s, row_r, item_y1 - pad_s, col_highlight_bg);
-                add_rect_outline(row_l, item_y0 + pad_s, row_r, item_y1 - pad_s, col_text_bright);
-
-                // A solid accent bar on the leading edge. The filled highlight
-                // and border already carry the selection; paired cursor arrows
-                // on top of them only added clutter.
-                add_quad(row_l, item_y0 + pad_s, row_l + 0.008f, item_y1 - pad_s, col_text_bright);
+                add_quad(list_x0, item_y0 + 0.008f, list_x1, item_y1 - 0.008f, col_highlight_bg);
+                add_rect_outline(list_x0, item_y0 + 0.008f, list_x1, item_y1 - 0.008f, col_border_bright);
+                // Vibrant indicator bar on active selection
+                add_quad(list_x0, item_y0 + 0.008f, list_x0 + 0.008f, item_y1 - 0.008f, col_text_bright);
+            } else if (is_hovered) {
+                add_quad(list_x0, item_y0 + 0.008f, list_x1, item_y1 - 0.008f, col_panel_bg);
+                add_rect_outline(list_x0, item_y0 + 0.008f, list_x1, item_y1 - 0.008f, col_border_bright);
             }
 
-            // Whole unselected rows recede together. Previously the title and
-            // subtitle of an unselected row were different hues, so three
-            // colours competed inside one entry.
-            const Color4 title_col = is_selected ? col_text_bright : col_text_dim;
-            const Color4 sub_col   = is_selected ? col_spec_label  : col_text_dim;
+            const Color4 title_col = is_selected ? col_title : (is_hovered ? col_accent_gold : col_text_normal);
+            const Color4 sub_col   = is_selected ? col_spec_label : col_text_dim;
 
-            // Entry number & Name
             char title_str[64];
-            std::snprintf(title_str, sizeof(title_str), "[%d] %s", i + 1, aircraft_names[i]);
-            draw_string(title_str, row_l + pad_m, item_cy + pad_m, type_item, title_col);
+            std::snprintf(title_str, sizeof(title_str), "[%d]  %s", i + 1, aircraft_names[i]);
+            draw_string(title_str, list_x0 + 0.020f, item_cy + 0.024f, 0.020f, title_col);
+            draw_string(aircraft_subtitles[i], list_x0 + 0.025f, item_cy - 0.022f, 0.014f, sub_col);
 
-            // Subtitle
-            draw_string(aircraft_subtitles[i], row_l + pad_l, item_cy - 0.018f,
-                        type_subtitle, sub_col);
-
-            // Active Badge, right-aligned against the column edge so a longer
-            // airframe name can never run into it.
             if (is_active) {
-                draw_string_right("[ACTIVE]", row_r - pad_s, item_cy + pad_m,
-                                  type_badge, col_active_badge);
+                draw_string_right("[ACTIVE]", list_x1 - 0.015f, item_cy + 0.024f, 0.015f, col_active_badge);
             }
         }
 
-        // --- RIGHT COLUMN: SPECIFICATION CARD ---
-        const float spec_x0 = split_x + 0.03f;
-        const float spec_x1 = x1 - 0.03f;
-        const float spec_top = header_y - 0.035f;
+        // --- RIGHT COLUMN: SPECIFICATION CARD & STORES PREVIEW ---
+        const float spec_x0 = split_x + 0.025f;
+        const float spec_x1 = x1 - 0.025f;
 
         // Card backdrop
-        add_quad(spec_x0, footer_y + 0.02f, spec_x1, header_y - 0.02f, col_card_bg);
-        add_rect_outline(spec_x0, footer_y + 0.02f, spec_x1, header_y - 0.02f, col_border_inner);
+        add_quad(spec_x0, bot, spec_x1, top, col_panel_bg);
+        add_rect_outline(spec_x0, bot, spec_x1, top, col_border_dim);
 
-        // Header for Card
-        char header_card[64];
+        char header_card[96];
         std::snprintf(header_card, sizeof(header_card), "AIRFRAME SPECIFICATION : %s", aircraft_names[selected_index_]);
-        draw_string(header_card, spec_x0 + 0.025f, spec_top - 0.020f, 0.021f, col_title);
-        add_line(spec_x0 + 0.02f, spec_top - 0.040f, spec_x1 - 0.02f, spec_top - 0.040f, col_border_inner);
+        draw_string(header_card, spec_x0 + 0.025f, top - 0.038f, 0.020f, col_title);
+        add_line(spec_x0 + 0.020f, top - 0.060f, spec_x1 - 0.020f, top - 0.060f, col_border_dim);
 
-        // Spec details per aircraft
-        struct SpecEntry {
-            const char* label;
-            const char* val;
-        };
-
+        struct SpecEntry { const char* label; const char* val; };
         std::vector<SpecEntry> specs;
         switch (selected_index_) {
-            case 0: // F-16C
+            case 0:
                 specs = {
                     {"ROLE & MISSION",    "TACTICAL MULTIROLE FIGHTER"},
-                    {"POWERPLANT",        "1X GENERAL ELECTRIC F110-GE-129"},
-                    {"THRUST RATINGS",    "DRY: 75.6 KN (17,000 LBF) / AB: 129.0 KN (29,000 LBF)"},
-                    {"SUPERCRUISE",       "NO (TRANSONIC AFTERBURNING ENVELOPE)"},
-                    {"MAX AIRSPEED",      "MACH 2.05 @ 36,000 FT (1,176 KNOTS)"},
-                    {"WEIGHTS",           "EMPTY: 20,500 LB | FUEL: 7,000 LB | MTOW: 42,300 LB"},
-                    {"FLCS ARCHITECTURE", "QUAD-REDUNDANT DIGITAL FLY-BY-WIRE (+9.0G / 25.2 AOA)"},
-                    {"AERODYNAMICS",      "NASA TP-1538 EMPIRICAL WIND TUNNEL TABLES"},
-                    {"AVIONICS / RADAR",  "AN/APG-68 PULSE DOPPLER + CAT I / CAT III FLCS"},
+                    {"POWERPLANT",        "1X GENERAL ELECTRIC F110-GE-129 AFTERBURNING TURBOFAN"},
+                    {"THRUST RATINGS",    "DRY: 75.6 KN (17,000 LBF)  |  AB: 129.0 KN (29,000 LBF)"},
+                    {"SUPERCRUISE",       "NO : SUBSONIC INTERCEPT / TRANSONIC AFTERBURNING ACCELERATION"},
+                    {"MAX AIRSPEED",      "MACH 2.05 @ 36,000 FT (1,176 KIAS)"},
+                    {"MASS PROPERTIES",   "EMPTY: 20,500 LB | INTERNAL FUEL: 7,000 LB | MTOW: 42,300 LB"},
+                    {"FLCS ARCHITECTURE", "QUAD-REDUNDANT DIGITAL FLY-BY-WIRE (+9.0G / 25.2 AOA LIMIT)"},
+                    {"AERODYNAMICS",      "NASA TP-1538 EMPIRICAL WIND TUNNEL TABLES (CL_MAX 1.40)"},
+                    {"STORES / HARDPOINTS","STA 1/9: AIM-120D | STA 2/8: AIM-9X | CTR: 300 GAL TANK"},
+                    {"TACTICAL SUITE",    "AN/APG-68 PULSE DOPPLER + CAT I / CAT III FLCS SELECTOR"}
                 };
                 break;
-            case 1: // F-15EX
+            case 1:
                 specs = {
                     {"ROLE & MISSION",    "HEAVY ALL-WEATHER AIR SUPERIORITY"},
-                    {"POWERPLANT",        "2X GENERAL ELECTRIC F110-GE-129 (TWIN ENGINE)"},
-                    {"THRUST RATINGS",    "DRY: 151.2 KN (34,000 LBF) / AB: 262.4 KN (59,000 LBF)"},
-                    {"SUPERCRUISE",       "NO (EXTREME AFTERBURNING CLIMB / COMBAT PERSISTENCE)"},
-                    {"MAX AIRSPEED",      "MACH 2.50 @ 40,000 FT (1,433 KNOTS)"},
-                    {"WEIGHTS",           "EMPTY: 31,700 LB | FUEL: 13,550 LB | MTOW: 81,000 LB"},
-                    {"FLCS ARCHITECTURE", "DIGITAL FLY-BY-WIRE (DFBW) (+9.0G / 29.5 DEG AOA)"},
-                    {"AERODYNAMICS",      "TWIN-TAIL AIR SUPERIORITY POLAR + HIGH COMPRESSIBILITY"},
-                    {"AVIONICS / RADAR",  "AN/APG-82(V)1 AESA + ADCP-II MISSION COMPUTER"},
+                    {"POWERPLANT",        "2X GENERAL ELECTRIC F110-GE-129 (TWIN ENGINE INSTALLATION)"},
+                    {"THRUST RATINGS",    "DRY: 151.2 KN (34,000 LBF)  |  AB: 262.4 KN (59,000 LBF)"},
+                    {"SUPERCRUISE",       "NO : EXTREME AFTERBURNING CLIMB / PERSISTENT COMBAT AIR PATROL"},
+                    {"MAX AIRSPEED",      "MACH 2.50 @ 40,000 FT (1,433 KIAS)"},
+                    {"MASS PROPERTIES",   "EMPTY: 31,700 LB | INTERNAL FUEL: 13,550 LB | MTOW: 81,000 LB"},
+                    {"FLCS ARCHITECTURE", "DIGITAL FLY-BY-WIRE (DFBW) (+9.0G / 29.5 DEG AOA LIMIT)"},
+                    {"AERODYNAMICS",      "TWIN-TAIL AIR SUPERIORITY POLAR + HIGH COMPRESSIBILITY MARGIN"},
+                    {"STORES / HARDPOINTS","STA 1-12: UP TO 12X AIM-120D AMRAAM / 2X CONFORMAL FUEL TANKS"},
+                    {"TACTICAL SUITE",    "AN/APG-82(V)1 AESA + EPAWSS EW SUITE + ADCP-II COMPUTER"}
                 };
                 break;
-            case 2: // Eurofighter Typhoon
+            case 2:
                 specs = {
                     {"ROLE & MISSION",    "HIGH-AGILITY CANARD-DELTA MULTIROLE AIR DEFENSE"},
                     {"POWERPLANT",        "2X EUROJET EJ200 ADVANCED AFTERBURNING TURBOFANS"},
-                    {"THRUST RATINGS",    "DRY: 120.0 KN (26,980 LBF) / AB: 180.0 KN (40,460 LBF)"},
-                    {"SUPERCRUISE",       "YES : SUSTAINED MACH 1.50 DRY CRUISE (NO REHEAT)"},
-                    {"MAX AIRSPEED",      "MACH 2.00+ @ 36,000 FT (1,150 KNOTS)"},
-                    {"WEIGHTS",           "EMPTY: 24,250 LB | FUEL: 11,020 LB | MTOW: 51,800 LB"},
-                    {"FLCS ARCHITECTURE", "QUAD CAREFREE HANDLING FBW + CLOSE-COUPLED CANARDS"},
-                    {"AERODYNAMICS",      "UNSTABLE PITCH SYNTHESIS (+9.0G / 35.0 DEG AOA LIMIT)"},
-                    {"AVIONICS / RADAR",  "CAPTOR-M / E-SCAN AESA + PIRATE FLIR IRST"},
+                    {"THRUST RATINGS",    "DRY: 120.0 KN (26,980 LBF)  |  AB: 180.0 KN (40,460 LBF)"},
+                    {"SUPERCRUISE",       "YES : SUSTAINED MACH 1.50 DRY CRUISE (NO REHEAT REQUIRED)"},
+                    {"MAX AIRSPEED",      "MACH 2.00+ @ 36,000 FT (1,150 KIAS)"},
+                    {"MASS PROPERTIES",   "EMPTY: 24,250 LB | INTERNAL FUEL: 11,020 LB | MTOW: 51,800 LB"},
+                    {"FLCS ARCHITECTURE", "QUAD CAREFREE HANDLING FBW + CLOSE-COUPLED ALL-MOVING CANARDS"},
+                    {"AERODYNAMICS",      "RELAXED PITCH STABILITY (+9.0G / 35.0 DEG UNLIMITED CAREFREE)"},
+                    {"STORES / HARDPOINTS","4X SEMI-RECESSED METEOR BVRAAM + 2X ASRAAM + WING TANKS"},
+                    {"TACTICAL SUITE",    "CAPTOR-M / E-SCAN AESA + PIRATE FLIR/IRST OPTRONICS"}
                 };
                 break;
-            case 3: // F-22A Raptor
+            case 3:
                 specs = {
                     {"ROLE & MISSION",    "5TH-GEN VERY LOW OBSERVABLE AIR DOMINANCE"},
-                    {"POWERPLANT",        "2X PRATT & WHITNEY F119-PW-100 (2D PITCH TVC)"},
-                    {"THRUST RATINGS",    "DRY: 232.0 KN (52,150 LBF) / AB: 312.0 KN (70,140 LBF)"},
-                    {"SUPERCRUISE",       "YES : SUSTAINED MACH 1.82 DRY CRUISE (MIL POWER)"},
-                    {"MAX AIRSPEED",      "MACH 2.25+ @ 45,000 FT (1,290 KNOTS)"},
-                    {"WEIGHTS",           "EMPTY: 43,340 LB | FUEL: 18,000 LB | MTOW: 83,500 LB"},
-                    {"FLCS ARCHITECTURE", "FBW INTEGRATED WITH +/-20 DEG 2D THRUST VECTOR NOZZLES"},
-                    {"AERODYNAMICS",      "SUPERMANEUVERABILITY ENVELOPE (+9.5G / 60+ DEG POST-STALL)"},
-                    {"AVIONICS / RADAR",  "AN/APG-77 AESA + INTEGRATED ELECTRONIC WARFARE"},
+                    {"POWERPLANT",        "2X PRATT & WHITNEY F119-PW-100 (2D PITCH THRUST VECTORING)"},
+                    {"THRUST RATINGS",    "DRY: 232.0 KN (52,150 LBF)  |  AB: 312.0 KN (70,140 LBF)"},
+                    {"SUPERCRUISE",       "YES : SUSTAINED MACH 1.82 DRY CRUISE (MILITARY POWER)"},
+                    {"MAX AIRSPEED",      "MACH 2.25+ @ 45,000 FT (1,290 KIAS)"},
+                    {"MASS PROPERTIES",   "EMPTY: 43,340 LB | INTERNAL FUEL: 18,000 LB | MTOW: 83,500 LB"},
+                    {"FLCS ARCHITECTURE", "5TH-GEN FBW UNIFIED WITH +/-20 DEG 2D PITCH VECTOR NOZZLES"},
+                    {"AERODYNAMICS",      "SUPERMANEUVERABILITY ENVELOPE (+9G / 60+ DEG POST-STALL AOA)"},
+                    {"STORES / HARDPOINTS","INTERNAL MAIN WEAPONS BAY: 6X AIM-120D | SIDE BAYS: 2X AIM-9X"},
+                    {"TACTICAL SUITE",    "AN/APG-77 AESA RADAR + LOW PROBABILITY OF INTERCEPT (LPI)"}
                 };
                 break;
-            case 4: // A-10C Warthog
+            case 4:
                 specs = {
-                    {"ROLE & MISSION",    "CLOSE AIR SUPPORT (CAS) & FORWARD AIR CONTROL"},
+                    {"ROLE & MISSION",    "CLOSE AIR SUPPORT (CAS) & FORWARD AIR CONTROL (FAC-A)"},
                     {"POWERPLANT",        "2X GENERAL ELECTRIC TF34-GE-100A HIGH-BYPASS TURBOFANS"},
                     {"THRUST RATINGS",    "DRY ONLY: 80.6 KN (18,130 LBF) TOTAL (NON-AFTERBURNING)"},
-                    {"SUPERCRUISE",       "NO : SUBSONIC LOW-ALTITUDE CRUISE TANK BUSTER"},
+                    {"SUPERCRUISE",       "NO : SUBSONIC HEAVY PAYLOAD / TANK LOITER ARCHITECTURE"},
                     {"MAX AIRSPEED",      "MACH 0.56 (380 KIAS DECK LEVEL / NEVER EXCEED 450 KIAS)"},
-                    {"WEIGHTS",           "EMPTY: 24,959 LB | FUEL: 10,700 LB | MTOW: 50,000 LB"},
-                    {"FLCS ARCHITECTURE", "DUAL HYDRAULIC REVERSIBLE LINKAGE + PITCH/YAW SAS"},
-                    {"AERODYNAMICS",      "HIGH-LIFT UNSWEPT WING (AR 6.54) + NACELLE PITCH COUPLING"},
-                    {"AVIONICS / RADAR",  "SADL TACTICAL DATALINK + SPLIT-DECELERON AIRBRAKES"},
+                    {"MASS PROPERTIES",   "EMPTY: 24,959 LB | INTERNAL FUEL: 10,700 LB | MTOW: 50,000 LB"},
+                    {"FLCS ARCHITECTURE", "DUAL HYDRAULIC REVERSIBLE LINKAGE + PITCH/YAW SAS AUGMENTED"},
+                    {"AERODYNAMICS",      "HIGH-LIFT UNSWEPT WING (AR 6.54) + NACELLE PITCH MOMENT"},
+                    {"STORES / HARDPOINTS","GAU-8/A 30MM GATLING CANNON + 11X PYLONS (AGM-65, GBU-12)"},
+                    {"TACTICAL SUITE",    "SADL TACTICAL DATALINK + SPLIT-DECELERON AIRBRAKES"}
                 };
                 break;
         }
 
-        // Text must stay inside the card: nothing here clips, so an overlong
-        // value would otherwise run straight over the border.
-        const float spec_text_x = spec_x0 + pad_m;
-        const float spec_avail  = (spec_x1 - pad_m) - spec_text_x;
+        const float spec_content_top = top - 0.068f;
+        const float row_h = (spec_content_top - bot - 0.015f) / static_cast<float>(specs.size());
+        const float spec_text_x = spec_x0 + 0.030f;
+        const float spec_avail  = (spec_x1 - 0.030f) - spec_text_x;
 
-        float curr_y = spec_top - 0.080f;
-        const float line_step = 0.058f;
-        for (const auto& sp : specs) {
-            draw_string(sp.label, spec_text_x, curr_y, type_spec_lbl, col_spec_label);
+        for (size_t idx = 0; idx < specs.size(); ++idx) {
+            const auto& sp = specs[idx];
+            const float ry1 = spec_content_top - static_cast<float>(idx) * row_h;
+            const float ry0 = ry1 - row_h;
 
-            // Shrink an overlong value to fit rather than letting it overflow.
-            float val_scale = type_spec_val;
+            // Subtle alternating row background for crisp readability
+            if (idx % 2 == 1) {
+                add_quad(spec_x0 + 0.005f, ry0 + 0.004f, spec_x1 - 0.005f, ry1 - 0.004f, col_row_alt);
+            }
+
+            // Label on top line of row
+            draw_string(sp.label, spec_text_x, ry1 - 0.030f, 0.015f, col_spec_label);
+
+            // Value on bottom line of row
+            float val_scale = 0.018f;
             const float val_w = measure_string(sp.val, val_scale);
             if (val_w > spec_avail && val_w > 0.0f) {
                 val_scale *= spec_avail / val_w;
             }
-            draw_string(sp.val, spec_text_x, curr_y - 0.024f, val_scale, col_spec_val);
-            curr_y -= line_step;
+            draw_string(sp.val, spec_text_x, ry0 + 0.032f, val_scale, col_spec_val);
+        }
+    }
+
+    void render_envelope_tab(float x0, float x1, float top, float bot) {
+        // Split-screen: Left (Flight Envelope Polar Plot) and Right (Aerodynamic Limits & Derivatives)
+        const float total_w = x1 - x0;
+        const float split_x = x0 + total_w * 0.50f;
+
+        // Left Card: Flight Envelope & Lift Curve
+        const float c0_x0 = x0 + 0.020f;
+        const float c0_x1 = split_x - 0.015f;
+        add_quad(c0_x0, bot, c0_x1, top, col_panel_bg);
+        add_rect_outline(c0_x0, bot, c0_x1, top, col_border_dim);
+        draw_string("AERODYNAMIC POLAR & FLIGHT ENVELOPE", c0_x0 + 0.025f, top - 0.038f, 0.020f, col_title);
+        add_line(c0_x0 + 0.020f, top - 0.060f, c0_x1 - 0.020f, top - 0.060f, col_border_dim);
+
+        // Vector plot coordinates
+        const float plot_x0 = c0_x0 + 0.050f;
+        const float plot_x1 = c0_x1 - 0.030f;
+        const float plot_y0 = bot + 0.080f;
+        const float plot_y1 = top - 0.120f;
+
+        // Grid lines
+        add_rect_outline(plot_x0, plot_y0, plot_x1, plot_y1, col_border_bright);
+        for (int gy = 1; gy <= 4; ++gy) {
+            float py = plot_y0 + (plot_y1 - plot_y0) * (static_cast<float>(gy) / 5.0f);
+            add_line(plot_x0, py, plot_x1, py, col_border_dim);
+        }
+        for (int gx = 1; gx <= 4; ++gx) {
+            float px = plot_x0 + (plot_x1 - plot_x0) * (static_cast<float>(gx) / 5.0f);
+            add_line(px, plot_y0, px, plot_y1, col_border_dim);
         }
 
+        // Plot aerodynamic curve (Lift CL vs Alpha or Mach)
+        constexpr int kPlotPoints = 32;
+        float prev_px = plot_x0;
+        float prev_py = plot_y0;
+        for (int i = 0; i < kPlotPoints; ++i) {
+            float t = static_cast<float>(i) / static_cast<float>(kPlotPoints - 1);
+            float px = plot_x0 + t * (plot_x1 - plot_x0);
+            // Non-linear lift curve slope with stall plateau
+            float cl = std::sin(t * 1.8f) * 1.35f;
+            float py = plot_y0 + (cl / 1.5f) * (plot_y1 - plot_y0);
+            if (i > 0) {
+                add_line(prev_px, prev_py, px, py, col_text_bright);
+            }
+            prev_px = px;
+            prev_py = py;
+        }
+
+        draw_string("CL MAX ENVELOPE (POLAR SLOPE 4.0/RAD)", plot_x0, plot_y1 + 0.024f, 0.016f, col_spec_label);
+        draw_string("-5 DEG AOA", plot_x0, plot_y0 - 0.035f, 0.015f, col_text_dim);
+        draw_string("+30 DEG AOA (STALL)", plot_x1 - 0.22f, plot_y0 - 0.035f, 0.015f, col_alert_red);
+
+        // Right Card: Structural G Limits, Mach Divergence & Damping Derivatives
+        const float c1_x0 = split_x + 0.015f;
+        const float c1_x1 = x1 - 0.020f;
+        add_quad(c1_x0, bot, c1_x1, top, col_panel_bg);
+        add_rect_outline(c1_x0, bot, c1_x1, top, col_border_dim);
+        draw_string("AIRCRAFT COEFFICIENTS & FLCS GAINS", c1_x0 + 0.025f, top - 0.038f, 0.020f, col_title);
+        add_line(c1_x0 + 0.020f, top - 0.060f, c1_x1 - 0.020f, top - 0.060f, col_border_dim);
+
+        struct CoeffEntry { const char* name; const char* val; const char* note; };
+        CoeffEntry coeffs[] = {
+            {"S_REF (WING AREA)",    "27.87 M^2",     "REFERENCE PLATFORM AREA"},
+            {"B_SPAN (WINGSPAN)",    "9.144 M",       "TIP-TO-TIP SPAN"},
+            {"C_BAR (MAC)",          "3.450 M",       "MEAN AERODYNAMIC CHORD"},
+            {"ASPECT RATIO",         "3.00",          "SUPERSONIC DELTA-TRAPEZOID"},
+            {"LE SWEEP ANGLE",       "40.0 DEG",      "COMPRESSIBILITY CONTROL"},
+            {"CD0 (PARASITIC DRAG)", "0.0200",        "ZERO-LIFT CLEAN DRAG"},
+            {"K (INDUCED DRAG)",     "0.1600",        "INDUCED FACTOR CD = CD0 + K*CL^2"},
+            {"MACH CRIT / PEAK",     "0.86 / 1.05",   "TRANSONIC DRAG RISE ONSET"},
+            {"MAX G ENVELOPE",       "+9.0G / -3.0G", "DIGITAL G-LIMITER INTEGRATED"},
+            {"MAX ALPHA LIMIT",      "25.2 DEG",      "AUTOPILOT CAT-I LIMITER"}
+        };
+
+        const float coeff_top = top - 0.068f;
+        const float c_row_h = (coeff_top - bot - 0.015f) / 10.0f;
+        for (size_t idx = 0; idx < 10; ++idx) {
+            const auto& ce = coeffs[idx];
+            const float ry1 = coeff_top - static_cast<float>(idx) * c_row_h;
+            const float ry0 = ry1 - c_row_h;
+            if (idx % 2 == 1) {
+                add_quad(c1_x0 + 0.005f, ry0 + 0.004f, c1_x1 - 0.005f, ry1 - 0.004f, col_row_alt);
+            }
+            draw_string(ce.name, c1_x0 + 0.025f, ry1 - 0.030f, 0.015f, col_spec_label);
+            draw_string_right(ce.val, c1_x1 - 0.025f, ry1 - 0.030f, 0.018f, col_spec_val);
+            draw_string(ce.note, c1_x0 + 0.025f, ry0 + 0.030f, 0.014f, col_text_dim);
+        }
+    }
+
+    void render_calibration_tab(float x0, float x1, float top, float bot,
+                                const input::ControllerProfile* ctrl_profile,
+                                const input::InputManager* input_mgr) {
+        // Split Left (Live Axis Oscilloscope & Curves) and Right (Detents & Input Status)
+        const float total_w = x1 - x0;
+        const float split_x = x0 + total_w * 0.50f;
+
+        // Left Card: Real-time Inceptor Curve
+        const float c0_x0 = x0 + 0.020f;
+        const float c0_x1 = split_x - 0.015f;
+        add_quad(c0_x0, bot, c0_x1, top, col_panel_bg);
+        add_rect_outline(c0_x0, bot, c0_x1, top, col_border_dim);
+        draw_string("FLIGHT STICK FORCE CURVE & DEADZONES", c0_x0 + 0.025f, top - 0.038f, 0.020f, col_title);
+        add_line(c0_x0 + 0.020f, top - 0.060f, c0_x1 - 0.020f, top - 0.060f, col_border_dim);
+
+        // Curve plot
+        const float plot_x0 = c0_x0 + 0.050f;
+        const float plot_x1 = c0_x1 - 0.030f;
+        const float plot_y0 = bot + 0.080f;
+        const float plot_y1 = top - 0.120f;
+        const float plot_cx = (plot_x0 + plot_x1) * 0.5f;
+        const float plot_cy = (plot_y0 + plot_y1) * 0.5f;
+
+        add_rect_outline(plot_x0, plot_y0, plot_x1, plot_y1, col_border_bright);
+        add_line(plot_x0, plot_cy, plot_x1, plot_cy, col_border_dim); // Center X
+        add_line(plot_cx, plot_y0, plot_cx, plot_y1, col_border_dim); // Center Y
+
+        // Deadzones
+        const float db_frac = ctrl_profile ? static_cast<float>(ctrl_profile->pitch_cal.inner_deadband) : 0.03f;
+        const float db_w = (plot_x1 - plot_cx) * db_frac;
+        add_quad(plot_cx - db_w, plot_y0, plot_cx + db_w, plot_y1, Color4{col_alert_red.r, col_alert_red.g, col_alert_red.b, 0.15f});
+
+        // Live Curve
+        const double curv = ctrl_profile ? ctrl_profile->pitch_cal.curvature : 0.50;
+        constexpr int kSteps = 40;
+        float prev_x = plot_x0;
+        float prev_y = plot_cy;
+        for (int i = 0; i <= kSteps; ++i) {
+            float norm_in = -1.0f + 2.0f * (static_cast<float>(i) / static_cast<float>(kSteps));
+            float norm_out = static_cast<float>(input::SignalConditioner::evaluate_force_curve(norm_in, curv));
+            float px = plot_cx + norm_in * (plot_x1 - plot_cx);
+            float py = plot_cy + norm_out * (plot_y1 - plot_cy);
+            if (i > 0) add_line(prev_x, prev_y, px, py, col_text_bright);
+            prev_x = px;
+            prev_y = py;
+        }
+
+        // Live input dot
+        const float live_pitch = input_mgr ? static_cast<float>(input_mgr->pitch_in) : 0.0f;
+        const float live_out   = static_cast<float>(input::SignalConditioner::evaluate_force_curve(live_pitch, curv));
+        const float dot_x = plot_cx + live_pitch * (plot_x1 - plot_cx);
+        const float dot_y = plot_cy + live_out * (plot_y1 - plot_cy);
+        add_quad(dot_x - 0.012f, dot_y - 0.012f, dot_x + 0.012f, dot_y + 0.012f, col_active_badge);
+
+        draw_string("F-16 TRANSDUCER CURVATURE: Y = (1-C)*X + C*X^3", plot_x0, plot_y1 + 0.024f, 0.016f, col_spec_label);
+        draw_string("-100% INCEPTOR", plot_x0, plot_y0 - 0.035f, 0.015f, col_text_dim);
+        draw_string("+100% INCEPTOR", plot_x1 - 0.18f, plot_y0 - 0.035f, 0.015f, col_text_dim);
+
+        // Right Card: Throttle Detents & Hardware Calibration Options
+        const float c1_x0 = split_x + 0.015f;
+        const float c1_x1 = x1 - 0.020f;
+        add_quad(c1_x0, bot, c1_x1, top, col_panel_bg);
+        add_rect_outline(c1_x0, bot, c1_x1, top, col_border_dim);
+        draw_string("THROTTLE DETENTS & CALIBRATION", c1_x0 + 0.025f, top - 0.038f, 0.020f, col_title);
+        add_line(c1_x0 + 0.020f, top - 0.060f, c1_x1 - 0.020f, top - 0.060f, col_border_dim);
+
+        // Live Throttle Bar
+        const float bar_x0 = c1_x0 + 0.040f;
+        const float bar_x1 = c1_x1 - 0.040f;
+        const float bar_y0 = top - 0.160f;
+        const float bar_y1 = top - 0.110f;
+        add_quad(bar_x0, bar_y0, bar_x1, bar_y1, col_bg_void);
+        add_rect_outline(bar_x0, bar_y0, bar_x1, bar_y1, col_border_bright);
+
+        const float thr_val = input_mgr ? static_cast<float>(input_mgr->throttle_in) : throttle_preview_val_;
+        const float fill_x1 = bar_x0 + (bar_x1 - bar_x0) * std::clamp(thr_val, 0.0f, 1.0f);
+        add_quad(bar_x0, bar_y0, fill_x1, bar_y1, col_text_bright);
+
+        // Detent lines
+        const float detent_mil = bar_x0 + (bar_x1 - bar_x0) * 0.85f;
+        add_line(detent_mil, bar_y0 - 0.015f, detent_mil, bar_y1 + 0.015f, col_active_badge);
+        draw_string("MIL (85%)", detent_mil - 0.045f, bar_y1 + 0.025f, 0.015f, col_active_badge);
+        draw_string("AFTERBURNER (88-100%)", bar_x1 - 0.240f, bar_y1 + 0.025f, 0.015f, col_alert_red);
+
+        // Calibration Hotkeys
+        float info_y = top - 0.230f;
+        draw_string("[I] INVERT THROTTLE AXIS", c1_x0 + 0.040f, info_y, 0.016f, col_spec_label);
+        draw_string("TOGGLE WHEN HARDWARE THROTTLE READS BACKWARDS", c1_x0 + 0.040f, info_y - 0.024f, 0.014f, col_text_dim);
+
+        info_y -= 0.075f;
+        draw_string("[J] HARDWARE AXIS LOCKOUT", c1_x0 + 0.040f, info_y, 0.016f, col_spec_label);
+        draw_string("ISOLATES JITTERY LEVERS AND RESTORES KEYBOARD ONLY", c1_x0 + 0.040f, info_y - 0.024f, 0.014f, col_text_dim);
+
+        info_y -= 0.075f;
+        draw_string("[1/2/3/4] RAPID DETENT SLAM", c1_x0 + 0.040f, info_y, 0.016f, col_spec_label);
+        draw_string("1=CUTOFF (0%) | 2=IDLE (8%) | 3=MIL (85%) | 4=MAX AB (100%)", c1_x0 + 0.040f, info_y - 0.024f, 0.014f, col_text_dim);
+    }
+
+    void render_sortie_tab(float x0, float x1, float top, float bot, aircraft::AircraftType active_aircraft) {
+        (void)active_aircraft;
+        // Sortie Dispatch: Mission scenario, Fuel fraction slider, Scramble Readiness
+        const float total_w = x1 - x0;
+        const float split_x = x0 + total_w * 0.48f;
+
+        // Left Card: Scramble Scenario
+        const float c0_x0 = x0 + 0.020f;
+        const float c0_x1 = split_x - 0.015f;
+        add_quad(c0_x0, bot, c0_x1, top, col_panel_bg);
+        add_rect_outline(c0_x0, bot, c0_x1, top, col_border_dim);
+        draw_string("MISSION SORTIE & SCENARIO SELECTION", c0_x0 + 0.025f, top - 0.038f, 0.020f, col_title);
+        add_line(c0_x0 + 0.020f, top - 0.060f, c0_x1 - 0.020f, top - 0.060f, col_border_dim);
+
+        struct Scenario { const char* title; const char* desc; };
+        Scenario scens[] = {
+            {"[01] RUNWAY READY (SCRAMBLE)", "HOT ENGINES RUNNING ON RUNWAY 09L - IMMEDIATE TAKEOFF"},
+            {"[02] AIRBORNE PATROL (CAP)",   "INITIAL LEVEL FLIGHT @ 15,000 FT / 450 KIAS COMBAT TRIM"},
+            {"[03] SUPERSONIC SPRINT",       "HIGH ALTITUDE REHEAT ENVELOPE @ 36,000 FT / MACH 1.8+"},
+            {"[04] LOW-LEVEL PENETRATION",   "HIGH SPEED 200 FT TERRAIN MASKING RUN THROUGH VALLEY"}
+        };
+
+        float sc_y = top - 0.110f;
+        for (size_t s = 0; s < 4; ++s) {
+            const bool is_first = (s == 0);
+            if (is_first) {
+                add_quad(c0_x0 + 0.015f, sc_y - 0.045f, c0_x1 - 0.015f, sc_y + 0.030f, col_highlight_bg);
+                add_rect_outline(c0_x0 + 0.015f, sc_y - 0.045f, c0_x1 - 0.015f, sc_y + 0.030f, col_text_bright);
+            }
+            draw_string(scens[s].title, c0_x0 + 0.025f, sc_y + 0.012f, 0.018f, is_first ? col_text_bright : col_title);
+            draw_string(scens[s].desc,  c0_x0 + 0.025f, sc_y - 0.022f, 0.014f, is_first ? col_spec_val : col_text_dim);
+            sc_y -= 0.105f;
+        }
+
+        // Right Card: Pre-Flight Mass, Fuel Load & Systems Readiness
+        const float c1_x0 = split_x + 0.015f;
+        const float c1_x1 = x1 - 0.020f;
+        add_quad(c1_x0, bot, c1_x1, top, col_panel_bg);
+        add_rect_outline(c1_x0, bot, c1_x1, top, col_border_dim);
+        draw_string("FUEL STATE & PRE-FLIGHT READINESS", c1_x0 + 0.025f, top - 0.038f, 0.020f, col_title);
+        add_line(c1_x0 + 0.020f, top - 0.060f, c1_x1 - 0.020f, top - 0.060f, col_border_dim);
+
+        draw_string("INTERNAL FUEL STATE SELECTION", c1_x0 + 0.030f, top - 0.090f, 0.016f, col_spec_label);
+
+        // Fuel Slider
+        const float s_x0 = c1_x0 + 0.030f;
+        const float s_x1 = c1_x1 - 0.030f;
+        const float s_y0 = top - 0.150f;
+        const float s_y1 = top - 0.120f;
+        add_quad(s_x0, s_y0, s_x1, s_y1, col_bg_void);
+        add_rect_outline(s_x0, s_y0, s_x1, s_y1, col_border_bright);
+
+        const float s_fill = s_x0 + (s_x1 - s_x0) * fuel_fraction_setting_;
+        add_quad(s_x0, s_y0, s_fill, s_y1, col_tab_active);
+
+        char fuel_txt[64];
+        std::snprintf(fuel_txt, sizeof(fuel_txt), "FUEL CAPACITY: %.0f%% (FULL TANKS)", fuel_fraction_setting_ * 100.0f);
+        draw_string(fuel_txt, s_x0, s_y0 - 0.025f, 0.016f, col_spec_val);
+
+        // Readiness Matrix
+        float chk_y = top - 0.230f;
+        draw_string("PRE-FLIGHT READINESS CHECKLIST:", c1_x0 + 0.030f, chk_y, 0.016f, col_spec_label);
+        chk_y -= 0.045f;
+
+        const char* checks[] = {
+            "[GO] FLCS QUAD COMPUTERS : ALL CHANNELS PASS",
+            "[GO] HYDRAULIC PRESSURE A/B : 3,000 PSI NOMINAL",
+            "[GO] MASS BALANCE & CG : WITHIN FLIGHT ENVELOPE",
+            "[GO] CANOPY & EJECTION SEAT : ARMED",
+            "[GO] TURBOFAN SPOOL INTEGRITY : PASS"
+        };
+        for (const char* chk : checks) {
+            draw_string(chk, c1_x0 + 0.030f, chk_y, 0.015f, col_text_bright);
+            chk_y -= 0.038f;
+        }
+    }
+
+    void upload_and_draw_buffers(float aspect) {
         // Upload Triangles
         glBindBuffer(GL_ARRAY_BUFFER, vbo_triangles_);
         glBufferData(GL_ARRAY_BUFFER, triangle_verts_.size() * sizeof(MenuVertex), triangle_verts_.data(), GL_DYNAMIC_DRAW);
@@ -587,7 +986,7 @@ public:
         glBufferData(GL_ARRAY_BUFFER, line_verts_.size() * sizeof(MenuVertex), line_verts_.data(), GL_DYNAMIC_DRAW);
         glBindBuffer(GL_ARRAY_BUFFER, 0);
 
-        // Setup OpenGL pipeline
+        // OpenGL pipeline
         glDisable(GL_DEPTH_TEST);
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -597,13 +996,15 @@ public:
         shader_.use();
         shader_.set_mat4("uProjection", proj);
 
-        // Draw Translucent Glass Panels
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, font_tex_);
+        shader_.set_int("uFontTex", 0);
+
         if (!triangle_verts_.empty()) {
             glBindVertexArray(vao_triangles_);
             glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(triangle_verts_.size()));
         }
 
-        // Draw Glowing Lines and Text
         if (!line_verts_.empty()) {
             glLineWidth(2.0f);
             glBindVertexArray(vao_lines_);
@@ -611,6 +1012,7 @@ public:
             glLineWidth(1.0f);
         }
 
+        glBindTexture(GL_TEXTURE_2D, 0);
         glBindVertexArray(0);
         glEnable(GL_DEPTH_TEST);
     }

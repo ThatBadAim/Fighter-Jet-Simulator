@@ -123,6 +123,21 @@ public:
         }
     }
 
+    void set_vec2(const char* name, float x, float y) const noexcept {
+        GLint loc = get_uniform_loc(name);
+        if (loc >= 0) {
+            glUniform2f(loc, x, y);
+        }
+    }
+
+    /// @brief Uploads a 3x3 matrix stored column-major.
+    void set_mat3(const char* name, const float* col_major9) const noexcept {
+        GLint loc = get_uniform_loc(name);
+        if (loc >= 0) {
+            glUniformMatrix3fv(loc, 1, GL_FALSE, col_major9);
+        }
+    }
+
     void set_vec3(const char* name, float x, float y, float z) const noexcept {
         GLint loc = get_uniform_loc(name);
         if (loc >= 0) {

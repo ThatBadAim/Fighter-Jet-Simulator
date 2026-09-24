@@ -36,19 +36,27 @@ public:
 
     /**
      * @brief Prandtl-Glauert compressibility correction factor.
+     *
+     * Continuous across the whole Mach range: subsonic PG up to the table limit,
+     * held on that plateau through the transonic region until the supersonic
+     * Ackeret factor falls below it, then Ackeret — floored at 1.0 so behaviour
+     * well above M1.4 is unchanged.  This used to switch to an Ackeret branch
+     * bounded at M^2-1 >= 0.1 above a hard-coded M1.05 while the caller gated on
+     * each airframe's own mach_peak (1.10-1.15), multiplying lift by up to 2.84
+     * in that band and then dropping it to 1.0: 10-15 G spikes near Mach 1.1.
      */
     [[nodiscard]] double prandtl_glauert(double mach) const noexcept {
         constexpr double MACH_TABLE_LIMIT = 0.80;
-        constexpr double MACH_PEAK = 1.05;
 
         if (mach < MACH_TABLE_LIMIT) {
             return 1.0 / std::sqrt((std::max)(0.05, 1.0 - mach * mach));
         }
-        if (mach <= MACH_PEAK) {
-            return 1.0 / std::sqrt(1.0 - MACH_TABLE_LIMIT * MACH_TABLE_LIMIT);
+        const double plateau = 1.0 / std::sqrt(1.0 - MACH_TABLE_LIMIT * MACH_TABLE_LIMIT);
+        if (mach <= 1.0) {
+            return plateau;
         }
-        const double m2 = (std::max)(mach * mach - 1.0, 0.10);
-        return 1.0 / std::sqrt(m2);
+        const double ackeret = 1.0 / std::sqrt((std::max)(mach * mach - 1.0, 1e-6));
+        return std::clamp(ackeret, 1.0, plateau);
     }
 
     /**
@@ -59,7 +67,12 @@ public:
 
         if (mach <= config.mach_peak) {
             const double t = (mach - config.mach_crit) / (config.mach_peak - config.mach_crit);
-            return config.cd_wave_peak * t * t * (3.0 - 2.0 * t);
+            const double wave = config.cd_wave_peak * t * t * (3.0 - 2.0 * t);
+            if (aircraft_type == aircraft::AircraftType::A10_THUNDERBOLT && mach > 0.70) {
+                const double a10_rise = (mach - 0.70) / 0.15;
+                return wave + 0.045 * a10_rise * a10_rise;
+            }
+            return wave;
         }
 
         const double decay = std::exp(-(mach - config.mach_peak) / 0.45);
@@ -191,8 +204,8 @@ public:
         coeffs.Cn = +0.16 * beta_rad - 0.10 * (ctrl.delta_r * DEG_TO_RAD) +
                     config.yaw_damping * (lat_damping * r_rate);
 
-        // Apply Prandtl-Glauert scaling to lift and moments below transonic peak
-        if (mach > 0.0 && mach < config.mach_peak) {
+        // Apply compressibility scaling to lift and moments (continuous in Mach)
+        if (mach > 0.0) {
             const double pg = prandtl_glauert(mach);
             coeffs.CL *= pg;
             coeffs.CY *= pg;
