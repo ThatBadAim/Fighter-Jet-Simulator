@@ -5,6 +5,7 @@
 #include "fastjet/math/quaternion.hpp"
 #include <cmath>
 #include <algorithm>
+#include <cstdint>
 
 namespace fastjet::environment {
 
@@ -34,6 +35,13 @@ private:
 
 public:
     WindTurbulenceModel() = default;
+
+    /// @brief Restart the gust noise from @p seed (0 keeps the default sequence).
+    /// Jets sharing one sky each need their own stream.
+    void seed(uint32_t s) noexcept {
+        rng_state_ = (s == 0) ? 0x87654321u : s;
+        gust_u_ = gust_v_ = gust_w_ = 0.0;
+    }
 
     /// @brief Update turbulence states for the current timestep
     /// @param dt Timestep in seconds

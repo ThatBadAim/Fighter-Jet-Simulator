@@ -8,6 +8,101 @@ envelopes, not from game rules.
 
 ---
 
+## 0. Status and revisions (2026-09-24)
+
+### What is built
+
+The guns-only MVP slice now runs from Phase 0 to Phase 4, plus a first cut of Phase 7. It is playable from the
+main menu (**DOGFIGHT**) or with `--dogfight [merge|offensive|defensive|range] --skill
+[novice|veteran|ace] --bandit TYPE`. `--watch` lets the AI fly your jet too. In flight:
+**F** fires the gun, **F9** starts a new fight, **F10** cycles the set-up, **F11** cycles the
+bandit's skill and **R** restarts the fight.
+
+| Piece | File | Tests |
+|---|---|---|
+| Aircraft entity (Phase 0) | `include/fastjet/sim/aircraft.hpp` | `test_aircraft_entity`: bit-identical to the old loop after 60 s (air work on three airframes, runway takeoff) |
+| World: jets, 4,096-round pool, events | `sim/world.hpp` | swept hit tests, kill credit, mid-airs |
+| Guns and ballistics (Phase 2) | `sim/gun.hpp`, `sim/combat_specs.hpp` | `test_guns`: analytic parabola and drag decay, rate and spin-up, tunnelling, predictor = live round (0 m error), hits at 600 m |
+| Component damage (Phase 3) | `sim/damage_model.hpp` | engine and thrust, twin-engine survival, wing roll-off, A-10 toughness |
+| Geometry and energy readouts (Phase 1) | `sim/air_combat_geometry.hpp` | `test_air_combat_geometry`: range, Vc, ATA, AA, HCA, turn rate, Ps against analytic values |
+| BFM AI (Phase 4) | `sim/bfm_pilot.hpp` | `test_bfm_ai`: gunnery kills in all 5 airframes, no terrain impacts or mid-airs, skill ordering, bit-exact replay |
+| Engagement and rules (Phase 1/7) | `sim/engagement.hpp` | outcome, stats, range targets |
+| Viewer | `src/f16_sim_viewer.cpp`, `graphics/tracer_renderer.hpp`, HUD combat block | bandit drawn in both views; tracers (1 in 5); TD box or locator; director pipper with range ring; R, Vc, AA, TR, Ps, ammo; damage cautions; outcome and debrief banner |
+
+The ownship is now `world.aircraft[0]` in every mode. Free flight is a world with one jet in it.
+
+### Changes to the original plan
+
+1. **Vertical slice first.** Phases 0–4 were built as thin layers across the whole stack, so a
+   playable 1v1 existed early. Each layer then got its own tests, instead of four sequential
+   phases with nothing to fly until Phase 4.
+2. **One control layer for every manoeuvre.** Each manoeuvre (pure, lead or lag pursuit,
+   break, jink, merge, extension, hard deck) is expressed as *aim point + G ceiling + throttle*.
+   A single lift-vector controller flies all of them: it banks the lift vector onto the
+   required specific force (gravity included) and closes on measured Nz. Line-of-sight-rate
+   feed-forward removes the standing tracking error against a turning target. For guns
+   tracks the error is taken off the gun line, not the velocity vector. This one controller
+   works on the FBW jets and on the A-10's direct linkage, which needs added pitch-rate
+   damping.
+3. **Director gunsight shares the live ballistics.** The pipper and the AI's trigger use
+   `Ballistics::step`, the same integrator the rounds use, so the sight cannot promise a hit
+   the rounds won't deliver. The test requires 0 m difference.
+4. **Hit sweeps in the target's frame.** Closure reaches 1,400 m/s (7 m per step), so the
+   round's path is swept relative to the moving target.
+5. **Skill is physiology and perception.** The tiers differ in reaction delay (the AI works
+   from a delayed track), willing G, tracking noise, trigger discipline, reassessment rate,
+   energy management and **greyout awareness**: the AI eases off when the OFC's vision-loss
+   model starts to grey out, as a pilot would. Without this, AI pilots sustaining 7.5 G or
+   more went GLOC and crashed.
+6. **Training rules are part of the AI.** Left-to-left merge, no forward-quarter gun shots,
+   a 150 m minimum range, CPA-based collision avoidance (predicted miss under 200 m within
+   4 s), a hard deck that uses the real pull-out altitude loss R(1−cos γ), and a transonic
+   chase cap. Without these, head-on merges ended in mid-airs and fights ran away to
+   Mach 1.4 on the deck.
+7. **G onset limit.** The AI loads the jet at 7 G/s and unloads at 12 G/s instead of stepping
+   the stick.
+8. **Separate turbulence per jet**, seeded per aircraft index. Jet 0 keeps the original stream,
+   which is what lets Phase 0 be bit-exact.
+
+### AI behaviour (24 seeds each, 180 s limit)
+
+| Set-up | Pairing (own vs bandit) | W / L / timeout | Unforced ground impacts | Mid-airs |
+|---|---|---|---|---|
+| Offensive perch | Ace vs Novice | 9 / 0 / 15 | 0 | 0 |
+| Offensive perch | Ace vs Veteran | 12 / 0 / 12 | 0 | 0 |
+| Offensive perch | Novice vs Ace | 0 / 8 / 16 | 0 | 0 |
+| Defensive perch | Novice vs Ace | 0 / 9 / 15 | 0 | 0 |
+| Head-on merge | Veteran vs Veteran | 0 / 0 / 24 | 0 | 0 |
+
+Across 240 AI-vs-AI fights there were zero unforced terrain impacts and zero mid-airs.
+
+### Findings in existing systems
+
+- **FLCS at high dynamic pressure.** Above ~420 m/s at low altitude (Mach 1.3+), coupled
+  roll and pull inputs on the F-16 law produce Nz excursions of 11–40 G and roll rates above
+  the rated 308 °/s. A straight stick step stays at or below 11.8 G. Auto-GCAS recoveries
+  that coincide with GLOC in this regime oscillate. The AI now avoids that corner of the
+  envelope, but a human can still reach it. The FLCS law needs work here. It is not fixed
+  in this slice because it predates it.
+- The HOTAS speedbrake switch is overridden every step by the keyboard toggle (pre-existing
+  behaviour, preserved exactly).
+
+### Next steps (in priority order)
+
+1. **Neutral fights are too passive.** Equal-skill merges almost always time out. Add the
+   one-circle/two-circle choice from relative turn performance, vertical moves (high and low
+   yo-yo, oblique turns) and a willingness to trade energy for angles when a shot is close.
+2. **Gun trigger on HOTAS.** Keyboard **F** is bindable; add `btn_trigger` to `InputConfig`
+   and gamepad right trigger.
+3. **Visual cues.** Hit sparks and a smoke trail on a damaged bandit, gun sound, a
+   distance-scaled spotting dot (Relaxed preset), and padlock view.
+4. Dogfight setup screen in the menu system (airframes, set-up, skill, weather, realism
+   preset). Today the set-up is chosen with F10/F11 and CLI flags.
+5. Then Phases 5–8 as originally planned (IR missiles and flares, sensors, multi-bandit,
+   debrief replay from the deterministic event log, distinct airframe models).
+
+---
+
 ## 1. Design pillars
 
 1. **Same physics for everyone.** AI pilots produce the same `PilotCommands` and
@@ -213,6 +308,10 @@ L ≈ 2–4 weeks of focused work.
 - Performance test with the full entity budget.
 
 ## 8. Decisions needed from you
+
+Defaults taken for the MVP (change any of them): guns-only first; BVR left out; same-type
+matchups by default, with mixed types allowed through `--bandit`; the F-16 model for every
+airframe; component damage.
 
 1. **Missiles in the first release, or guns-only MVP first?** (Recommended:
    guns-only MVP — it exercises every system except guidance and is where BFM

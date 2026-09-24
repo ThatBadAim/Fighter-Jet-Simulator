@@ -5,6 +5,37 @@
 
 namespace fastjet::graphics {
 
+/// @brief Dogfight symbology: target track, gunsight, weapons and the fight's state.
+/// Directions are unit vectors in the ownship's body axes (X nose, Y right wing, Z belly).
+struct CombatTelemetry {
+    bool active = false;              ///< Dogfight mode running (draws the combat HUD)
+    bool target_valid = false;        ///< Bandit tracked
+    double target_dir_b[3] = {1.0, 0.0, 0.0};
+    double target_range_m = 0.0;
+    double closure_mps = 0.0;
+    double aspect_deg = 0.0;
+    double ata_deg = 0.0;
+    bool pipper_valid = false;        ///< Director gunsight solution available
+    double pipper_dir_b[3] = {1.0, 0.0, 0.0};
+    double gun_max_range_m = 1200.0;  ///< Outer edge of the range ring
+    bool in_gun_range = false;
+    int ammo = 0;
+    bool gun_firing = false;
+    char gun_name[12] = "";
+    double turn_rate_dps = 0.0;
+    double ps_mps = 0.0;
+    int hits_scored = 0;
+    int hits_taken = 0;
+    double hit_cue_s = 0.0;           ///< "HIT" flash time remaining
+    bool engine_damage = false;
+    bool fuel_leak = false;
+    bool engine_fire = false;
+    bool control_damage = false;
+    char status[64] = "";             ///< Fight description (skill, set-up)
+    char banner[40] = "";             ///< Outcome, empty while the fight is on
+    char debrief[96] = "";            ///< One-line score under the banner
+};
+
 /// @brief Comprehensive real-time cockpit avionics and propulsion telemetry
 /// All data required for in-cockpit displays and aural alerts.
 struct AvionicsTelemetry {
@@ -64,6 +95,8 @@ struct AvionicsTelemetry {
     double ofc_gloc_blackout_frac = 0.0;     ///< Screen-space fade [0=clear, 1=full black]
     double ofc_gcas_tti_sec       = 999.0;   ///< Seconds to terrain impact at current trajectory
     double ofc_g_exposure         = 0.0;     ///< G-exposure accumulator value (debug / HUD readout)
+
+    CombatTelemetry combat{};
 };
 
 } // namespace fastjet::graphics

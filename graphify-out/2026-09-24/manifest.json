@@ -246,9 +246,9 @@
     "semantic_hash": ""
   },
   "include/fastjet/graphics/flight_instruments.hpp": {
-    "mtime": 1790267206.3409348,
-    "seen": 1790268055.9164543,
-    "ast_hash": "a81674aeaed7ddb4a777599c72b4966b",
+    "mtime": 1790268767.3911614,
+    "seen": 1790270316.8784246,
+    "ast_hash": "a913b80b2c95293f2b40b55b105255da",
     "semantic_hash": ""
   },
   "include/fastjet/graphics/gl_common.hpp": {
@@ -264,9 +264,9 @@
     "semantic_hash": ""
   },
   "include/fastjet/graphics/render_engine.hpp": {
-    "mtime": 1790267568.2939978,
-    "seen": 1790268055.9164615,
-    "ast_hash": "67f755bf0d1e893532ddc2e9fd771163",
+    "mtime": 1790269335.60584,
+    "seen": 1790270316.8784382,
+    "ast_hash": "27273f5eecee309014196f6cae80e974",
     "semantic_hash": ""
   },
   "include/fastjet/graphics/shader.hpp": {
@@ -282,9 +282,9 @@
     "semantic_hash": ""
   },
   "src/f16_sim_viewer.cpp": {
-    "mtime": 1790114064.521424,
-    "seen": 1790114501.9688072,
-    "ast_hash": "9dc148bbf5cf67e10cb5d9f5400851cf",
+    "mtime": 1790269951.2068682,
+    "seen": 1790270316.8784883,
+    "ast_hash": "715c1b59648f75db660a37ac845147b0",
     "semantic_hash": ""
   },
   "tests/test_camera_rig.cpp": {
@@ -324,9 +324,9 @@
     "semantic_hash": ""
   },
   "README.md": {
-    "mtime": 1790268072.42965,
-    "seen": 1790268076.825412,
-    "ast_hash": "73f48113385c9ed36fbf0ee8a7177787",
+    "mtime": 1790270312.337692,
+    "seen": 1790270316.8785548,
+    "ast_hash": "fa745828396a09809b5aa14426a63d11",
     "semantic_hash": ""
   },
   "tests/test_flcs_review.cpp": {
@@ -396,9 +396,9 @@
     "semantic_hash": ""
   },
   "CMakeLists.txt": {
-    "mtime": 1790114134.6746674,
-    "seen": 1790114501.9688993,
-    "ast_hash": "fe4990c9415aee7f80324249e594eaec",
+    "mtime": 1790270159.9971254,
+    "seen": 1790270316.8785539,
+    "ast_hash": "e35c453b9d208476c4a9215b19f87249",
     "semantic_hash": ""
   },
   "tests/test_throttle_control.cpp": {
@@ -420,9 +420,9 @@
     "semantic_hash": ""
   },
   "include/fastjet/graphics/terrain_mesh.hpp": {
-    "mtime": 1789814092.0765567,
-    "seen": 1789814368.2860007,
-    "ast_hash": "f5b53eb4e915a64b80b44cbfba3772e6",
+    "mtime": 1790269043.618457,
+    "seen": 1790270316.8784504,
+    "ast_hash": "34be1a73f7ed9b32bce3aaab463e015a",
     "semantic_hash": ""
   },
   "tests/test_terrain_field.cpp": {
@@ -462,9 +462,9 @@
     "semantic_hash": ""
   },
   "include/fastjet/audio/audio_engine.hpp": {
-    "mtime": 1790105612.960873,
-    "seen": 1790106369.438862,
-    "ast_hash": "31d9b0b5576c5885d8f8c5057098a6cd",
+    "mtime": 1790269119.5864549,
+    "seen": 1790270316.878373,
+    "ast_hash": "3432ccf7f1641af48d1738b732ff5aae",
     "semantic_hash": ""
   },
   "include/fastjet/environment/wind_turbulence.hpp": {
@@ -492,9 +492,9 @@
     "semantic_hash": ""
   },
   "include/fastjet/graphics/model_glb.hpp": {
-    "mtime": 1790267552.3774002,
-    "seen": 1790268055.916461,
-    "ast_hash": "b17aef11157dc58574bc8233dcea6bb9",
+    "mtime": 1790268984.0456562,
+    "seen": 1790270316.878437,
+    "ast_hash": "78d93c9721389f0940b7d504892384da",
     "semantic_hash": ""
   },
   "include/fastjet/graphics/stb_image.h": {
@@ -750,9 +750,9 @@
     "semantic_hash": ""
   },
   "include/fastjet/graphics/terrain_textures.hpp": {
-    "mtime": 1790108859.8542807,
-    "seen": 1790111525.6722846,
-    "ast_hash": "93044d10dafe452888b21ee72851b76d",
+    "mtime": 1790269043.6186228,
+    "seen": 1790270316.8784518,
+    "ast_hash": "ba2d61a6bf03bd28e115c4e246f52e9a",
     "semantic_hash": ""
   },
   "tests/test_render_fidelity.cpp": {
@@ -780,9 +780,33 @@
     "semantic_hash": ""
   },
   "include/fastjet/graphics/instrument_canvas.hpp": {
-    "mtime": 1790267195.870743,
-    "seen": 1790268055.916459,
-    "ast_hash": "b2806fdd0788ad5d0210f78cab313e63",
+    "mtime": 1790268676.2401843,
+    "seen": 1790270316.878434,
+    "ast_hash": "f2deac5fcec54dcd79e590a919d548b8",
+    "semantic_hash": ""
+  },
+  "include/fastjet/core/thread_pool.hpp": {
+    "mtime": 1790268925.5930445,
+    "seen": 1790270316.8783767,
+    "ast_hash": "36ca79ad4cd5739ab699a3d231f8b762",
+    "semantic_hash": ""
+  },
+  "include/fastjet/graphics/frame_pacer.hpp": {
+    "mtime": 1790270055.003087,
+    "seen": 1790270316.8784275,
+    "ast_hash": "e9995e1aed33fd21588d58b1b4057761",
+    "semantic_hash": ""
+  },
+  "include/fastjet/graphics/gpu_profiler.hpp": {
+    "mtime": 1790268533.7024944,
+    "seen": 1790270316.87843,
+    "ast_hash": "a0cc8ea4eb4348e0112c5aef28e755ca",
+    "semantic_hash": ""
+  },
+  "tests/test_thread_pool.cpp": {
+    "mtime": 1790270145.4838376,
+    "seen": 1790270316.8785434,
+    "ast_hash": "22e306335048baf344eea9eff8c6cd1a",
     "semantic_hash": ""
   }
 }

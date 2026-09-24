@@ -17,6 +17,7 @@ public:
         SETTINGS,
         CREDITS,
         QUIT,
+        DOGFIGHT,
     };
 
     void layout(const LayoutContext& ctx, MenuServices& svc, std::vector<Widget>& out) override {
@@ -24,9 +25,10 @@ public:
         const Metrics& m = ctx.theme.metrics;
         const bool flying = svc.in_flight();
         struct Entry { Item id; const char* label; ButtonVariant variant; };
-        const std::array<Entry, 5> entries = {{
+        const std::array<Entry, 6> entries = {{
             {START, flying ? "RESUME FLIGHT" : "START FLIGHT", ButtonVariant::MENU},
             {MISSION, "AIRCRAFT & MISSION", ButtonVariant::MENU},
+            {DOGFIGHT, "DOGFIGHT", ButtonVariant::MENU},
             {SETTINGS, "SETTINGS", ButtonVariant::MENU},
             {CREDITS, "CREDITS", ButtonVariant::MENU},
             {QUIT, "QUIT", ButtonVariant::MENU},
@@ -52,6 +54,7 @@ public:
         switch (id) {
             case START: svc.emit(svc.in_flight() ? MenuAction::RESUME_FLIGHT : MenuAction::START_FLIGHT); break;
             case MISSION: svc.emit(MenuAction::OPEN_MISSION_SELECT); break;
+            case DOGFIGHT: svc.emit(MenuAction::START_DOGFIGHT); break;
             case SETTINGS: svc.navigate(ScreenId::SETTINGS, true); break;
             case CREDITS: svc.navigate(ScreenId::CREDITS, true); break;
             case QUIT: confirm_quit(svc); break;

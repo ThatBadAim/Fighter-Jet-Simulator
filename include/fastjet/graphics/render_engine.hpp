@@ -20,11 +20,14 @@
 #include "fastjet/fdm/flight_state.hpp"
 #include "fastjet/flcs/imu_sensor.hpp"
 #include "fastjet/graphics/model_glb.hpp"
+#include "fastjet/graphics/tracer_renderer.hpp"
 #include "fastjet/graphics/aircraft_menu.hpp"
 #include "fastjet/graphics/ui_canvas.hpp"
 #include "fastjet/ui/theme.hpp"
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <vector>
 #include <string>
 
 namespace fastjet::graphics {
@@ -60,7 +63,19 @@ private:
     ShadowMap shadow_map_;
     CloudLayer clouds_;
     ExhaustPlume exhaust_;
+    TracerRenderer tracers_;
     RenderQuality quality_{};
+
+    /// Other aircraft in the sky this frame (dogfight bandits), drawn in both views.
+    struct Traffic {
+        fdm::FlightState state{};
+        bool gear_down{false};
+    };
+    static constexpr int kMaxTraffic = 8;
+    std::array<Traffic, kMaxTraffic> traffic_{};
+    int traffic_count_ = 0;
+    /// Tracer streaks this frame, world NED head/tail pairs.
+    std::vector<math::Vector3> tracer_world_;
     WeatherState weather_{};
     double time_s_ = 0.0;
 
@@ -333,6 +348,7 @@ public:
         if (!hdr_.init()) return false;
         if (!clouds_.init()) return false;
         if (!exhaust_.init()) return false;
+        if (!tracers_.init()) return false;
         if (!shadow_map_.init(quality_.shadow_map_size)) {
             std::cerr << "[RenderEngine] Shadow map unavailable; continuing without sun shadows\n";
         }
@@ -391,6 +407,7 @@ public:
         shadow_map_.destroy();
         clouds_.destroy();
         exhaust_.destroy();
+        tracers_.destroy();
         gpu_profiler_.destroy();
         cockpit_shader_.destroy();
         mfd_shader_.destroy();
@@ -503,6 +520,22 @@ public:
             environment_.render_ground(view_proj_world, eye_ned, &ctx);
             gpu_profiler_.mark("airframe");
             glDisable(GL_CULL_FACE);
+
+            // Other jets: seen from either view, drawn eye-relative like the ownship.
+            for (int i = 0; i < traffic_count_; ++i) {
+                const Traffic& t = traffic_[static_cast<size_t>(i)];
+                f16_model_.render_world(proj_world * view_rot, t.state, t.gear_down, ctx);
+            }
+            if (!tracer_world_.empty() && hdr) {
+                tracers_.clear();
+                for (size_t i = 0; i + 1 < tracer_world_.size(); i += 2) {
+                    const math::Vector3 h = tracer_world_[i] - eye_ned;
+                    const math::Vector3 t = tracer_world_[i + 1] - eye_ned;
+                    tracers_.add(static_cast<float>(h.x), static_cast<float>(h.y), static_cast<float>(h.z),
+                                 static_cast<float>(t.x), static_cast<float>(t.y), static_cast<float>(t.z));
+                }
+                tracers_.render(proj_world * view_rot);
+            }
 
             if (chase) {
                 f16_model_.render_world(proj_world * view_rot, state, telemetry.gear_deployed, ctx);
@@ -679,6 +712,19 @@ public:
         hdr_.vision_overlay(greyout, viewport_width_, viewport_height_);
         render_menu_overlay(aspect, telemetry, ctrl_profile, input_mgr);
         gpu_profiler_.end_frame();
+    }
+
+    /// @brief Other aircraft to draw this frame (replaces the previous list).
+    void clear_traffic() noexcept { traffic_count_ = 0; }
+    void add_traffic(const fdm::FlightState& state, bool gear_down) noexcept {
+        if (traffic_count_ < kMaxTraffic) traffic_[static_cast<size_t>(traffic_count_++)] = {state, gear_down};
+    }
+
+    /// @brief Tracer streaks to draw this frame, world NED positions.
+    void clear_tracers() noexcept { tracer_world_.clear(); }
+    void add_tracer(const math::Vector3& head, const math::Vector3& tail) {
+        tracer_world_.push_back(head);
+        tracer_world_.push_back(tail);
     }
 
     /// @brief Per-pass GPU timing (developer tool; off by default).

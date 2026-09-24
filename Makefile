@@ -13,7 +13,8 @@ TESTS = test_atmosphere test_ballistic test_gyroscopic test_performance \
         test_render_pipeline test_propulsion test_landing_gear test_compressibility test_integrated_flight test_throttle_control test_performance_envelope \
         test_terrain_field test_terrain_render test_ground_collision test_ofc_handover test_ofc_closed_loop \
         test_aircraft_specs test_multi_aircraft_performance test_model_glb \
-        test_user_settings test_menu_navigation test_render_fidelity test_thread_pool
+        test_user_settings test_menu_navigation test_render_fidelity test_thread_pool \
+        test_aircraft_entity test_guns test_air_combat_geometry test_bfm_ai
 
 TARGETS = $(addprefix $(BIN_DIR)/, $(TESTS))
 
@@ -133,6 +134,18 @@ test_render_fidelity: $(BIN_DIR)/test_render_fidelity
 test_thread_pool: $(BIN_DIR)/test_thread_pool
 	./$(BIN_DIR)/test_thread_pool
 
+test_aircraft_entity: $(BIN_DIR)/test_aircraft_entity
+	./$(BIN_DIR)/test_aircraft_entity
+
+test_guns: $(BIN_DIR)/test_guns
+	./$(BIN_DIR)/test_guns
+
+test_air_combat_geometry: $(BIN_DIR)/test_air_combat_geometry
+	./$(BIN_DIR)/test_air_combat_geometry
+
+test_bfm_ai: $(BIN_DIR)/test_bfm_ai
+	./$(BIN_DIR)/test_bfm_ai
+
 test_propulsion: $(BIN_DIR)/test_propulsion
 	./$(BIN_DIR)/test_propulsion
 
@@ -192,6 +205,10 @@ run_all: all
 	@./$(BIN_DIR)/test_menu_navigation
 	@./$(BIN_DIR)/test_render_fidelity
 	@./$(BIN_DIR)/test_thread_pool
+	@./$(BIN_DIR)/test_aircraft_entity
+	@./$(BIN_DIR)/test_guns
+	@./$(BIN_DIR)/test_air_combat_geometry
+	@./$(BIN_DIR)/test_bfm_ai
 	@echo "================ All Tests Completed Successfully! ================"
 
 clean:

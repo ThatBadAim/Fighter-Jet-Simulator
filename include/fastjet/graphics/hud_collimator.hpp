@@ -709,6 +709,8 @@ public:
             }
         }
 
+        if (tel.combat.active) build_combat_symbology(tel.combat, hud_col, D);
+
         // All symbology is masked cleanly within the combiner glass aperture
         masked_vertex_count_ = lines_.size();
 
@@ -716,6 +718,113 @@ public:
         glBindBuffer(GL_ARRAY_BUFFER, vbo_);
         glBufferData(GL_ARRAY_BUFFER, lines_.size() * sizeof(HUDVertex), lines_.data(), GL_DYNAMIC_DRAW);
         glBindBuffer(GL_ARRAY_BUFFER, 0);
+    }
+
+    /// @brief Dogfight symbology: target designator (or locator line when the
+    /// bandit is off the HUD), director gun pipper with range ring, target
+    /// readouts, weapon state, damage cautions and the fight outcome.
+    void build_combat_symbology(const CombatTelemetry& c, const Color4& hud_col, float D) {
+        const Color4 amber = Color4::amber();
+        auto to_hud = [D](const double* d, float& x, float& y) {
+            if (d[0] < 0.05) return false; // behind or abeam: cannot be drawn in the HUD plane
+            x = static_cast<float>(D * d[1] / d[0]);
+            y = static_cast<float>(-D * d[2] / d[0]);
+            return true;
+        };
+        auto circle = [&](float cx, float cy, float r, float frac, const Color4& col) {
+            const int seg = 32;
+            const int n = std::max(1, static_cast<int>(seg * frac));
+            for (int i = 0; i < n; ++i) {
+                // Clockwise from 12 o'clock, like a range bar unwinding.
+                const float a0 = 1.5707963f - 6.2831853f * static_cast<float>(i) / seg;
+                const float a1 = 1.5707963f - 6.2831853f * static_cast<float>(i + 1) / seg;
+                add_line(cx + r * std::cos(a0), cy + r * std::sin(a0), -D, cx + r * std::cos(a1), cy + r * std::sin(a1),
+                         -D, col);
+            }
+        };
+        const float hud_r = D * std::tan(0.10f); // usable symbol field radius
+
+        // Target designator box, or a locator line pointing at the bandit.
+        if (c.target_valid) {
+            float tx = 0.0f, ty = 0.0f;
+            const bool front = to_hud(c.target_dir_b, tx, ty);
+            if (front && std::hypot(tx, ty) < hud_r) {
+                const float h = D * 0.007f;
+                add_rect(tx, ty, 2.0f * h, 2.0f * h, -D, hud_col);
+                if (c.hit_cue_s > 0.0) draw_string_centered("HIT", tx, ty + h + D * 0.006f, D * 0.008f, -D, hud_col);
+            } else {
+                const double ay = c.target_dir_b[1];
+                const double az = -c.target_dir_b[2];
+                const double n = std::max(1e-6, std::hypot(ay, az));
+                const float ux = static_cast<float>(ay / n);
+                const float uy = static_cast<float>(az / n);
+                const float r0 = D * 0.012f;
+                const float r1 = D * 0.045f;
+                add_line(ux * r0, uy * r0, -D, ux * r1, uy * r1, -D, hud_col);
+                char ata[8];
+                std::snprintf(ata, sizeof(ata), "%d", static_cast<int>(std::round(c.ata_deg)));
+                draw_string_centered(ata, ux * (r1 + D * 0.010f), uy * (r1 + D * 0.010f), D * 0.008f, -D, hud_col);
+            }
+        }
+
+        // Director gun pipper: put it on the bandit and the rounds meet him.
+        // The ring unwinds with range; full ring = max gun range.
+        if (c.pipper_valid) {
+            float px = 0.0f, py = 0.0f;
+            if (to_hud(c.pipper_dir_b, px, py) && std::hypot(px, py) < hud_r * 1.3f) {
+                const float r = D * 0.0175f; // 35 mil reticle
+                const Color4 col = c.in_gun_range ? hud_col : amber;
+                circle(px, py, r, 1.0f, col);
+                add_rect(px, py, D * 0.0012f, D * 0.0012f, -D, col);
+                const float frac = static_cast<float>(std::clamp(c.target_range_m / c.gun_max_range_m, 0.0, 1.0));
+                circle(px, py, r * 0.8f, frac, col);
+            }
+        }
+
+        // Target readouts, lower right: range (nm), closure (kt), aspect, angle off.
+        const float rx = D * std::tan(0.070f);
+        float ry = -D * std::tan(0.010f);
+        const float line = D * 0.011f;
+        char buf[32];
+        if (c.target_valid) {
+            std::snprintf(buf, sizeof(buf), "R %.2f", c.target_range_m / 1852.0);
+            draw_string(buf, rx, ry, D * 0.008f, -D, hud_col);
+            ry -= line;
+            std::snprintf(buf, sizeof(buf), "VC %d", static_cast<int>(std::round(c.closure_mps * 1.94384)));
+            draw_string(buf, rx, ry, D * 0.008f, -D, hud_col);
+            ry -= line;
+            std::snprintf(buf, sizeof(buf), "AA %d", static_cast<int>(std::round(c.aspect_deg)));
+            draw_string(buf, rx, ry, D * 0.008f, -D, hud_col);
+            ry -= line;
+        }
+        std::snprintf(buf, sizeof(buf), "%s %d", c.gun_name, c.ammo);
+        draw_string(buf, rx, ry, D * 0.008f, -D, c.ammo > 0 ? hud_col : amber);
+        if (c.gun_firing) draw_string("FIRE", rx + D * 0.045f, ry, D * 0.008f, -D, hud_col);
+
+        // Energy readouts under the G-meter: turn rate [deg/s] and Ps [ft/s].
+        const float lx = -D * std::tan(0.082f) - D * 0.015f;
+        float ly = -D * std::tan(0.004f);
+        std::snprintf(buf, sizeof(buf), "TR %.1f", c.turn_rate_dps);
+        draw_string(buf, lx, ly, D * 0.008f, -D, hud_col);
+        ly -= line;
+        std::snprintf(buf, sizeof(buf), "PS %+d", static_cast<int>(std::round(c.ps_mps * 3.28084)));
+        draw_string(buf, lx, ly, D * 0.008f, -D, hud_col);
+
+        // Damage cautions, centre low.
+        float cy = -D * std::tan(0.025f);
+        if (c.engine_fire) { draw_string_centered("ENGINE FIRE", 0.0f, cy, D * 0.010f, -D, Color4::red()); cy -= line; }
+        if (c.engine_damage) { draw_string_centered("ENG DAMAGE", 0.0f, cy, D * 0.009f, -D, amber); cy -= line; }
+        if (c.control_damage) { draw_string_centered("FLT CONTROL", 0.0f, cy, D * 0.009f, -D, amber); cy -= line; }
+        if (c.fuel_leak) { draw_string_centered("FUEL LEAK", 0.0f, cy, D * 0.009f, -D, amber); }
+
+        // Fight status line and the outcome banner.
+        if (c.status[0]) draw_string_centered(c.status, 0.0f, D * std::tan(0.112f), D * 0.007f, -D, hud_col);
+        if (c.banner[0]) {
+            const float by = D * std::tan(0.060f);
+            draw_string_centered(c.banner, 0.0f, by, D * 0.015f, -D, amber);
+            if (c.debrief[0]) draw_string_centered(c.debrief, 0.0f, by - D * 0.022f, D * 0.008f, -D, amber);
+            draw_string_centered("F9 NEW FIGHT", 0.0f, by - D * 0.036f, D * 0.008f, -D, amber);
+        }
     }
 
     /// @brief Render collimated symbology that is masked to the physical combiner glass

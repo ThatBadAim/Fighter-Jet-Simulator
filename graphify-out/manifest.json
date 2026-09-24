@@ -258,15 +258,15 @@
     "semantic_hash": ""
   },
   "include/fastjet/graphics/hud_collimator.hpp": {
-    "mtime": 1789811425.9048448,
-    "seen": 1789811577.9657335,
-    "ast_hash": "d85071710abca2a29da0492101cbf951",
+    "mtime": 1790278196.6554794,
+    "seen": 1790278622.5142918,
+    "ast_hash": "f2194242fb919ea89155fd492d12fd36",
     "semantic_hash": ""
   },
   "include/fastjet/graphics/render_engine.hpp": {
-    "mtime": 1790269335.60584,
-    "seen": 1790270316.8784382,
-    "ast_hash": "27273f5eecee309014196f6cae80e974",
+    "mtime": 1790278249.8502781,
+    "seen": 1790278622.5142953,
+    "ast_hash": "76c0e909687d9194865acb5b24ffee11",
     "semantic_hash": ""
   },
   "include/fastjet/graphics/shader.hpp": {
@@ -282,9 +282,9 @@
     "semantic_hash": ""
   },
   "src/f16_sim_viewer.cpp": {
-    "mtime": 1790269951.2068682,
-    "seen": 1790270316.8784883,
-    "ast_hash": "715c1b59648f75db660a37ac845147b0",
+    "mtime": 1790278426.736287,
+    "seen": 1790278622.5143523,
+    "ast_hash": "752316725a5bb385100f80cd182c0a95",
     "semantic_hash": ""
   },
   "tests/test_camera_rig.cpp": {
@@ -396,9 +396,9 @@
     "semantic_hash": ""
   },
   "CMakeLists.txt": {
-    "mtime": 1790270159.9971254,
-    "seen": 1790270316.8785539,
-    "ast_hash": "e35c453b9d208476c4a9215b19f87249",
+    "mtime": 1790278063.9692404,
+    "seen": 1790278622.514401,
+    "ast_hash": "a6e5d0c4d79a19295d4b4b95f75b4fa4",
     "semantic_hash": ""
   },
   "tests/test_throttle_control.cpp": {
@@ -468,9 +468,9 @@
     "semantic_hash": ""
   },
   "include/fastjet/environment/wind_turbulence.hpp": {
-    "mtime": 1789760886.134756,
-    "seen": 1789762179.9602573,
-    "ast_hash": "99dd5643912d49d675fac5874804bc10",
+    "mtime": 1790275895.5191047,
+    "seen": 1790278622.5142589,
+    "ast_hash": "24a0b40ae05c0369d86a11a49e1de9be",
     "semantic_hash": ""
   },
   "include/fastjet/flcs/aircraft_flcs.hpp": {
@@ -486,9 +486,9 @@
     "semantic_hash": ""
   },
   "include/fastjet/graphics/cockpit_telemetry.hpp": {
-    "mtime": 1789765666.5021923,
-    "seen": 1789765764.2108133,
-    "ast_hash": "5ae0fbff1e02b6bb1b33d597de940880",
+    "mtime": 1790278196.6550965,
+    "seen": 1790278622.5142841,
+    "ast_hash": "6685e0415b84f61f00ab869e68350cdd",
     "semantic_hash": ""
   },
   "include/fastjet/graphics/model_glb.hpp": {
@@ -581,24 +581,6 @@
     "ast_hash": "d9e75ff022a886d2c1bf32118dc4311f",
     "semantic_hash": ""
   },
-  "scratch/menu_screen.png": {
-    "mtime": 1789813943.3767188,
-    "seen": 1789813956.0908327,
-    "ast_hash": "3cb8211140e4e12e31d819ce94fec427",
-    "semantic_hash": ""
-  },
-  "scratch/chase_ground.png": {
-    "mtime": 1789814277.1257575,
-    "seen": 1789814368.2860534,
-    "ast_hash": "4e4eb5ba1702a1ff352f07b946f91296",
-    "semantic_hash": ""
-  },
-  "scratch/high_fidelity_ground.png": {
-    "mtime": 1789814267.1513946,
-    "seen": 1789814368.2860544,
-    "ast_hash": "0bae7b3444a8f182bffbd3c46ac7bd26",
-    "semantic_hash": ""
-  },
   "include/fastjet/graphics/ui_canvas.hpp": {
     "mtime": 1790105570.6105459,
     "seen": 1790106369.4389796,
@@ -630,9 +612,9 @@
     "semantic_hash": ""
   },
   "include/fastjet/ui/screen.hpp": {
-    "mtime": 1790105449.7425096,
-    "seen": 1790106369.4390264,
-    "ast_hash": "7aa7c6c6fce865ad0aa37dd81c84139f",
+    "mtime": 1790278229.6764574,
+    "seen": 1790278622.5143433,
+    "ast_hash": "8e1aaf5908f9cabaf0a7afb0406776e8",
     "semantic_hash": ""
   },
   "include/fastjet/ui/screens/credits_screen.hpp": {
@@ -642,15 +624,15 @@
     "semantic_hash": ""
   },
   "include/fastjet/ui/screens/main_menu_screen.hpp": {
-    "mtime": 1790105449.7388232,
-    "seen": 1790106369.4390311,
-    "ast_hash": "f14c4f49964368606914c4a13ea06eeb",
+    "mtime": 1790278229.6766012,
+    "seen": 1790278622.514345,
+    "ast_hash": "ebd1e9c4340ab96d4fc1bb0bcd833f48",
     "semantic_hash": ""
   },
   "include/fastjet/ui/screens/settings_screen.hpp": {
-    "mtime": 1790111070.5390892,
-    "seen": 1790111525.6723173,
-    "ast_hash": "52df5c7a23335edda8c67de914f73674",
+    "mtime": 1790278229.6761632,
+    "seen": 1790278622.514346,
+    "ast_hash": "3da1b869974625d3865f5e7359b0bf4c",
     "semantic_hash": ""
   },
   "include/fastjet/ui/sdl_menu_bridge.hpp": {
@@ -672,9 +654,9 @@
     "semantic_hash": ""
   },
   "include/fastjet/ui/user_settings.hpp": {
-    "mtime": 1790111070.5386765,
-    "seen": 1790111525.672337,
-    "ast_hash": "3448c25ea10eb2d837f5772f496c948f",
+    "mtime": 1790278229.6756856,
+    "seen": 1790278622.5143495,
+    "ast_hash": "b1c11d57f3a6f5069d7bb583bfe50642",
     "semantic_hash": ""
   },
   "include/fastjet/ui/widgets.hpp": {
@@ -768,9 +750,9 @@
     "semantic_hash": ""
   },
   "docs/dogfight-mode-plan.md": {
-    "mtime": 1790116465.0553255,
-    "seen": 1790116485.619748,
-    "ast_hash": "814094eaf2ead1abd679201edc52ea66",
+    "mtime": 1790278617.5935037,
+    "seen": 1790278622.5144038,
+    "ast_hash": "4d42bb07f52d0fb0c4fea4a54cd48b3d",
     "semantic_hash": ""
   },
   "include/fastjet/graphics/cockpit_gauges.hpp": {
@@ -807,6 +789,84 @@
     "mtime": 1790270145.4838376,
     "seen": 1790270316.8785434,
     "ast_hash": "22e306335048baf344eea9eff8c6cd1a",
+    "semantic_hash": ""
+  },
+  "include/fastjet/graphics/tracer_renderer.hpp": {
+    "mtime": 1790278146.1767802,
+    "seen": 1790278622.51432,
+    "ast_hash": "5e42ae55d3121a43c7f5c991f0fbf8b5",
+    "semantic_hash": ""
+  },
+  "include/fastjet/sim/air_combat_geometry.hpp": {
+    "mtime": 1790276070.9282494,
+    "seen": 1790278622.5143318,
+    "ast_hash": "d259765e8796d63f1018889b2d69d35d",
+    "semantic_hash": ""
+  },
+  "include/fastjet/sim/aircraft.hpp": {
+    "mtime": 1790276036.0275671,
+    "seen": 1790278622.514333,
+    "ast_hash": "360697893a507aee09ac8923405d5e7d",
+    "semantic_hash": ""
+  },
+  "include/fastjet/sim/bfm_pilot.hpp": {
+    "mtime": 1790277978.0751817,
+    "seen": 1790278622.5143337,
+    "ast_hash": "c9dcdb8b0971d7483105fce1c1d2bb00",
+    "semantic_hash": ""
+  },
+  "include/fastjet/sim/combat_specs.hpp": {
+    "mtime": 1790275957.184969,
+    "seen": 1790278622.5143344,
+    "ast_hash": "823d533b1a75f8066282958295f6fe38",
+    "semantic_hash": ""
+  },
+  "include/fastjet/sim/damage_model.hpp": {
+    "mtime": 1790276027.751304,
+    "seen": 1790278622.5143352,
+    "ast_hash": "63bbbfc25ac717b07e8dae4746a83d3b",
+    "semantic_hash": ""
+  },
+  "include/fastjet/sim/engagement.hpp": {
+    "mtime": 1790277331.5332434,
+    "seen": 1790278622.514336,
+    "ast_hash": "374b057a65cdf3f33ebbd7d8a21ea4eb",
+    "semantic_hash": ""
+  },
+  "include/fastjet/sim/gun.hpp": {
+    "mtime": 1790276002.3190286,
+    "seen": 1790278622.5143368,
+    "ast_hash": "566933918d0d5bff60a9ec8b0a7fd469",
+    "semantic_hash": ""
+  },
+  "include/fastjet/sim/world.hpp": {
+    "mtime": 1790276126.458352,
+    "seen": 1790278622.5143375,
+    "ast_hash": "e39ea6e005dff312a5a4b3f89ba31b0e",
+    "semantic_hash": ""
+  },
+  "tests/test_air_combat_geometry.cpp": {
+    "mtime": 1790277793.3776073,
+    "seen": 1790278622.5143554,
+    "ast_hash": "186df433e5e6cfcdd4ce7b729ff224f1",
+    "semantic_hash": ""
+  },
+  "tests/test_aircraft_entity.cpp": {
+    "mtime": 1790276381.306913,
+    "seen": 1790278622.5143561,
+    "ast_hash": "86ee91961f83ae584fd10ddbc13d964f",
+    "semantic_hash": ""
+  },
+  "tests/test_bfm_ai.cpp": {
+    "mtime": 1790277822.402727,
+    "seen": 1790278622.514361,
+    "ast_hash": "38ef592dc4a13b165ab060b56f770d65",
+    "semantic_hash": ""
+  },
+  "tests/test_guns.cpp": {
+    "mtime": 1790276536.640422,
+    "seen": 1790278622.5143714,
+    "ast_hash": "374a15771d8a8c6a4add3f76632872a9",
     "semantic_hash": ""
   }
 }

@@ -68,7 +68,7 @@ inline constexpr std::array<std::string_view, static_cast<size_t>(ColorblindMode
 /// style layouts in place on AZERTY/QWERTZ keyboards.
 namespace scancode {
 inline constexpr int32_t NONE = 0;
-inline constexpr int32_t A = 4, B = 5, D = 7, G = 10, H = 11, I = 12, J = 13, M = 16, R = 21, T = 23, V = 25;
+inline constexpr int32_t A = 4, B = 5, D = 7, F = 9, G = 10, H = 11, I = 12, J = 13, M = 16, R = 21, T = 23, V = 25;
 inline constexpr int32_t NUM_1 = 30, NUM_5 = 34;
 inline constexpr int32_t RETURN = 40, ESCAPE = 41, BACKSPACE = 42, TAB = 43, SPACE = 44;
 inline constexpr int32_t F1 = 58, F8 = 65;
@@ -95,6 +95,7 @@ enum class InputAction : uint8_t {
     MOUSE_LOOK,
     TRIM_RESET,
     RESET_FLIGHT,
+    FIRE_GUN,
     COUNT
 };
 inline constexpr size_t kInputActionCount = static_cast<size_t>(InputAction::COUNT);
@@ -134,6 +135,7 @@ inline constexpr std::array<ActionInfo, kInputActionCount> kActionInfo = {{
     {"mouse_look",    {scancode::TAB, scancode::NONE}},
     {"trim_reset",    {scancode::T, scancode::NONE}},
     {"reset_flight",  {scancode::R, scancode::NONE}},
+    {"fire_gun",      {scancode::F, scancode::NONE}},
 }};
 
 /// @brief Keys owned by fixed hotkeys (menu, camera, airframe, detents,

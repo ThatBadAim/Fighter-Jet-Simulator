@@ -108,7 +108,11 @@ if(FASTJET_BUILD_TESTS)
         test_ofc_handover
         test_ofc_closed_loop
         test_user_settings
-        test_menu_navigation)
+        test_menu_navigation
+        test_aircraft_entity
+        test_guns
+        test_air_combat_geometry
+        test_bfm_ai)
 
     # Tests that need SDL3 and/or an OpenGL context.
     set(FASTJET_GRAPHICS_TESTS

@@ -24,6 +24,8 @@
 #include "fastjet/fdm/fuel_system.hpp"
 #include "fastjet/gear/landing_gear.hpp"
 #include "fastjet/environment/ground_collision.hpp"
+#include "fastjet/sim/engagement.hpp"
+#include "fastjet/sim/world.hpp"
 
 #define CGLTF_IMPLEMENTATION
 #define STB_IMAGE_IMPLEMENTATION
@@ -100,7 +102,12 @@ int main(int argc, char* argv[]) {
     std::cout << "  H:                      Toggle Cockpit G-Head Motion (Default: Fixed DEP like MSFS)\n";
     std::cout << "  T / R:                  Trim reset / Reset simulation\n";
     std::cout << "  Esc / Gamepad Start:    Pause menu (settings, credits, quit)\n";
+    std::cout << "  F:                      Fire gun (dogfight)\n";
+    std::cout << "  F9 / F10:               Dogfight: new fight / cycle set-up (merge, perch, range)\n";
+    std::cout << "  F11:                    Dogfight: cycle bandit skill\n";
     std::cout << "  (Flight keys can be rebound in Settings > Controls.)\n";
+    std::cout << "  --dogfight [merge|offensive|defensive|range] --skill [novice|veteran|ace] --bandit TYPE\n";
+    std::cout << "  --watch:                Dogfight demo: the AI flies your jet as well\n";
     std::cout << "  --profile:              Print frame timing and per-pass GPU cost every 2 s\n";
     std::cout << "---------------------------------------------------------\n";
 
@@ -117,6 +124,9 @@ int main(int argc, char* argv[]) {
     bool profile = false;            // --profile: frame timing report
     bool cli_size = false;           // --width/--height override the saved resolution for this run
     std::string settings_arg;        // --settings PATH
+    bool start_dogfight = false;     // --dogfight: straight into a 1v1
+    sim::EngagementSetup dogfight_setup{};
+    bool bandit_type_set = false;
     ui::ScreenId boot_screen = ui::ScreenId::MAIN;
     std::optional<ui::SettingsSection> boot_tab;
 
@@ -148,6 +158,28 @@ int main(int argc, char* argv[]) {
         if (arg == "--profile") profile = true;
         if (arg == "--aircraft" && i + 1 < argc) {
             selected_aircraft = aircraft::parse_aircraft_type(argv[++i]);
+        }
+        if (arg == "--dogfight") {
+            start_dogfight = true;
+            no_menu = true;
+            if (i + 1 < argc && argv[i + 1][0] != '-') {
+                const std::string g = argv[++i];
+                if (g == "offensive") dogfight_setup.geometry = sim::StartGeometry::OFFENSIVE_PERCH;
+                else if (g == "defensive") dogfight_setup.geometry = sim::StartGeometry::DEFENSIVE_PERCH;
+                else if (g == "range") dogfight_setup.geometry = sim::StartGeometry::GUNNERY_RANGE;
+                else dogfight_setup.geometry = sim::StartGeometry::HEAD_ON_MERGE;
+            }
+        }
+        if (arg == "--watch") dogfight_setup.own_is_ai = true; // AI flies your jet too (demo)
+        if (arg == "--skill" && i + 1 < argc) {
+            const std::string k = argv[++i];
+            dogfight_setup.skill = k == "novice" ? sim::AiSkill::NOVICE
+                                 : k == "ace"    ? sim::AiSkill::ACE
+                                                 : sim::AiSkill::VETERAN;
+        }
+        if (arg == "--bandit" && i + 1 < argc) {
+            dogfight_setup.bandit_type = aircraft::parse_aircraft_type(argv[++i]);
+            bandit_type_set = true;
         }
     }
 
@@ -235,15 +267,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // 2. Initialize Physics & Flight Dynamics Model
-    // Configurable across F-16C, F-15EX, Typhoon, F-22A, and A-10C
-    propulsion::MultiEngine engine(selected_aircraft);
-    gear::LandingGear landing_gear(selected_aircraft);
-    auto mass = fdm::FuelSystem::compute(engine.fuel_kg, selected_aircraft);
-    const fdm::RK4Integrator integrator(0.005);
-    aero::AircraftAeroModel aero_model(selected_aircraft);
-    flcs::AircraftFLCS flight_control_system(selected_aircraft);
-    flcs::OnBoardFlightComputer ofc(selected_aircraft); ///< On-Board Flight Computer (GLOC + Auto-GCAS)
+    // 2. Physics lives in sim::World (see the flight state set-up below).
 
     auto joy_driver = std::make_shared<input::SDL3InputDriver>();
     if (joy_driver->initialize() && joy_driver->get_device_count() > 0) {
@@ -260,8 +284,6 @@ int main(int argc, char* argv[]) {
             std::cout << "[AUDIO] Procedural cockpit sound engine online (SDL3).\n";
         }
     }
-    environment::WindTurbulenceModel wind_model;
-    wind_model.base_wind_speed_mps = 5.0; // 10 knot crosswind
 
     // 4. Menu system and settings observers. The menu edits the settings
     //    model only; these observers push changes out to each subsystem.
@@ -334,49 +356,73 @@ int main(int argc, char* argv[]) {
     constexpr double AIRCRAFT_SWITCH_BANNER_SEC = 2.5;
     double aircraft_switch_timer = 0.0;
 
-    fdm::FlightState state = reset_flight_state();
-    fdm::FlightState prev_state = state;
-    bool is_crashed = false;
+    // Every jet lives in a sim::World and flies the same per-aircraft
+    // pipeline. Free flight is a world of one; a dogfight is an Engagement
+    // (a world with an AI bandit, weapons and rules). The ownship is always
+    // aircraft[0], reached through `own`.
+    double throttle = start_airborne ? 0.65 : 0.08; // Lever position; ground idle for runway lineup
+    auto free_world = std::make_unique<sim::World>();
+    auto dogfight = std::make_unique<sim::Engagement>();
+    bool dogfight_active = false;
     bool gear_down = true;
+    free_world->clear();
+    free_world->add(selected_aircraft, reset_flight_state());
+    sim::Aircraft* own = &free_world->aircraft[0];
+    own->landing_gear.deployed = gear_down;
 
-    double sim_time = 0.0;
-    fdm::AircraftForces current_forces{};
-    flcs::IMUData current_imu{};
-    current_imu.Nz = 1.0;
+    // Dogfight HUD cue timers and the event read cursor.
+    double hit_cue_timer = 0.0;
+    int dogfight_events_read = 0;
+
+    auto start_dogfight_now = [&]() {
+        dogfight_setup.own_type = selected_aircraft;
+        if (!bandit_type_set) dogfight_setup.bandit_type = selected_aircraft;
+        dogfight_setup.seed = static_cast<uint32_t>(SDL_GetTicks()) | 1u;
+        dogfight->setup(dogfight_setup);
+        dogfight_active = true;
+        own = &dogfight->world.aircraft[0];
+        gear_down = false;
+        throttle = 0.9;
+        hit_cue_timer = 0.0;
+        dogfight_events_read = 0;
+        renderer.camera_rig().reset();
+        std::cout << "[DOGFIGHT] " << sim::to_string(dogfight_setup.geometry) << " vs "
+                  << sim::to_string(dogfight_setup.skill) << " " << aircraft::to_string(dogfight_setup.bandit_type)
+                  << ". Fight's on!\n";
+    };
+    auto leave_dogfight = [&]() {
+        if (!dogfight_active) return;
+        dogfight_active = false;
+        free_world->clear();
+        free_world->add(selected_aircraft, reset_flight_state());
+        own = &free_world->aircraft[0];
+        gear_down = true;
+        own->landing_gear.deployed = gear_down;
+    };
 
     auto switch_aircraft = [&](aircraft::AircraftType new_type) {
         // Re-selecting the active airframe would otherwise reset every actuator
         // and re-seat the gear for no visible reason, UNLESS currently crashed.
-        if (new_type == selected_aircraft && !is_crashed) {
+        if (new_type == selected_aircraft && !own->crashed) {
             std::cout << "[AIRCRAFT] " << aircraft::to_string(new_type)
                       << " already selected.\n";
             return;
         }
 
         selected_aircraft = new_type;
-        // Carry the fuel state across: an in-flight airframe change must not
-        // hand the pilot a full tank.
-        engine.configure(new_type, /*preserve_fuel=*/true);
-        aero_model.configure(new_type);
-        flight_control_system.configure(new_type);
-        // The OFC plans recoveries on the airframe's own G, alpha and roll limits.
-        ofc.configure(new_type);
-        landing_gear.configure(new_type);
-        mass = fdm::FuelSystem::compute(engine.fuel_kg, new_type);
+        // A dogfight is set up for its airframes: changing jet means leaving it.
+        leave_dogfight();
+        // Carry the fuel state across (an in-flight airframe change must not
+        // hand the pilot a full tank); the OFC re-plans on the new limits.
+        own->configure(new_type);
+        own->landing_gear.deployed = gear_down;
 
         // If switching while crashed or stationary on the runway, reset stance cleanly
-        if (is_crashed || (!start_airborne && state.airspeed() < 5.0 && landing_gear.weight_on_wheels())) {
-            state = reset_flight_state();
-            prev_state = state;
-            is_crashed = false;
-            engine.reset();
-            landing_gear.reset(new_type);
-            ofc.reset();
-            flight_control_system.reset();
+        if (own->crashed || (!start_airborne && own->state.airspeed() < 5.0 && own->landing_gear.weight_on_wheels())) {
+            own->reset(reset_flight_state());
+            gear_down = true;
+            own->landing_gear.deployed = gear_down;
             input_mgr.trim_hat.reset();
-            current_forces = fdm::AircraftForces{};
-            current_imu = flcs::IMUData{};
-            current_imu.Nz = 1.0;
         }
 
         // Raise the on-screen confirmation. The console banner below is
@@ -409,6 +455,10 @@ int main(int argc, char* argv[]) {
     if (start_chase) {
         renderer.camera_rig().set_mode(graphics::CameraMode::CHASE);
     }
+    if (start_dogfight) {
+        start_dogfight_now();
+        if (start_chase) renderer.camera_rig().set_mode(graphics::CameraMode::CHASE);
+    }
 
     // Keyboard stick emulation state
     double target_pitch = 0.0;
@@ -417,7 +467,6 @@ int main(int argc, char* argv[]) {
     double stick_pitch  = 0.0;
     double stick_roll   = 0.0;
     double pedal_yaw    = 0.0;
-    double throttle     = start_airborne ? 0.65 : 0.08; // Ground idle for runway lineup
     double throttle_dir = 0.0;  // Commanded lever direction this frame [-1, +1]
 
     // Physical throttle lever slew: a pilot takes roughly 1.5 s to run the
@@ -452,8 +501,8 @@ int main(int argc, char* argv[]) {
         frame_pacer.wait();
 
         // Event handling
-        const ui::ControlSettings& controls = settings.committed().controls;
-        auto bound = [&controls](ui::InputAction a, SDL_Scancode sc) { return controls.binding(a).matches(static_cast<int32_t>(sc)); };
+        const ui::ControlSettings& controls_cfg = settings.committed().controls;
+        auto bound = [&controls_cfg](ui::InputAction a, SDL_Scancode sc) { return controls_cfg.binding(a).matches(static_cast<int32_t>(sc)); };
 
         SDL_Event ev;
         while (SDL_PollEvent(&ev)) {
@@ -503,9 +552,9 @@ int main(int argc, char* argv[]) {
                         switch_aircraft(renderer.menu().get_selected_type());
                     }
                     if (launched) {
-                        state = reset_flight_state();
-                        prev_state = state;
-                        is_crashed = false;
+                        leave_dogfight();
+                        own->reset(reset_flight_state());
+                        own->landing_gear.deployed = gear_down;
                         throttle = start_airborne ? 0.65 : 0.08;
                         flight_started = true;
                         mission_from_main_menu = false;
@@ -528,8 +577,8 @@ int main(int argc, char* argv[]) {
                 } else if (right_mouse_down || mouse_look_toggle) {
                     // 0.0032 rad/px at 100% sensitivity: smooth pilot cervical rotation
                     constexpr float MOUSE_LOOK_RAD_PER_PX = 0.0032f;
-                    const float gain = MOUSE_LOOK_RAD_PER_PX * static_cast<float>(controls.mouse_sensitivity) / 100.0f;
-                    const float y_sign = controls.invert_mouse_y ? 1.0f : -1.0f;
+                    const float gain = MOUSE_LOOK_RAD_PER_PX * static_cast<float>(controls_cfg.mouse_sensitivity) / 100.0f;
+                    const float y_sign = controls_cfg.invert_mouse_y ? 1.0f : -1.0f;
                     renderer.camera_rig().add_head_look(
                         static_cast<float>(ev.motion.xrel) * gain,
                         static_cast<float>(ev.motion.yrel) * gain * y_sign
@@ -567,9 +616,9 @@ int main(int argc, char* argv[]) {
                         renderer.menu().move_down();
                     } else if (ev.key.key == SDLK_RETURN || ev.key.key == SDLK_KP_ENTER || ev.key.key == SDLK_SPACE) {
                         switch_aircraft(renderer.menu().get_selected_type());
-                        state = reset_flight_state();
-                        prev_state = state;
-                        is_crashed = false;
+                        leave_dogfight();
+                        own->reset(reset_flight_state());
+                        own->landing_gear.deployed = gear_down;
                         throttle = start_airborne ? 0.65 : 0.08;
                         renderer.menu().close();
                         flight_started = true;
@@ -610,7 +659,7 @@ int main(int argc, char* argv[]) {
                     mouse_look_toggle = !mouse_look_toggle;
                     SDL_SetWindowRelativeMouseMode(window, mouse_look_toggle);
                 }
-                if (bound(ui::InputAction::WHEEL_BRAKES, ev.key.scancode) && environment::GroundCollision::get_agl(state) > 20.0) {
+                if (bound(ui::InputAction::WHEEL_BRAKES, ev.key.scancode) && environment::GroundCollision::get_agl(own->state) > 20.0) {
                     renderer.camera_rig().reset_head_look();
                 }
                 if (bound(ui::InputAction::TRIM_RESET, ev.key.scancode)) input_mgr.trim_hat.reset();
@@ -622,21 +671,18 @@ int main(int argc, char* argv[]) {
                     std::cout << "[CAMERA] Cockpit G-Head Motion: "
                               << (renderer.camera_rig().g_head_motion() ? "ENABLED" : "DISABLED (Fixed DEP Screen-Lock mode like MSFS/Real Jets)") << "\n";
                 }
-                if (bound(ui::InputAction::RESET_FLIGHT, ev.key.scancode) && !ev.key.repeat) {
+                if (bound(ui::InputAction::RESET_FLIGHT, ev.key.scancode) && !ev.key.repeat && dogfight_active) {
+                    // In a dogfight, reset means a fresh fight from the same set-up.
+                    start_dogfight_now();
+                } else if (bound(ui::InputAction::RESET_FLIGHT, ev.key.scancode) && !ev.key.repeat) {
                     // Reset from crash
-                    state = reset_flight_state();
-                    prev_state = state;
-                    is_crashed = false;
-                    engine.reset();
-                    landing_gear.reset(selected_aircraft);
-                    ofc.reset();
-                    flight_control_system.reset();
+                    gear_down = true;
+                    own->reset(reset_flight_state());
+                    own->landing_gear.deployed = gear_down;
                     input_mgr.trim_hat.reset();
                     speedbrake_out = false;
                     wheel_braking = false;
                     input_mgr.speedbrake.position = 0.0;
-                    gear_down = true;
-                    mass = fdm::FuelSystem::compute(engine.fuel_kg, selected_aircraft);
                     target_pitch = 0.0;
                     target_roll  = 0.0;
                     target_yaw   = 0.0;
@@ -644,9 +690,6 @@ int main(int argc, char* argv[]) {
                     stick_roll   = 0.0;
                     pedal_yaw    = 0.0;
                     throttle     = start_airborne ? 0.65 : 0.08;
-                    current_forces = fdm::AircraftForces{};
-                    current_imu = flcs::IMUData{};
-                    current_imu.Nz = 1.0;
                     renderer.camera_rig().reset();
                     std::cout << "[SIM] Flight state reset ("
                               << (start_airborne ? "level flight" : "runway lineup") << ") ("
@@ -660,7 +703,7 @@ int main(int argc, char* argv[]) {
                 }
                 if (bound(ui::InputAction::LANDING_GEAR, ev.key.scancode) && !ev.key.repeat) {
                     gear_down = !gear_down;
-                    landing_gear.deployed = gear_down;
+                    own->landing_gear.deployed = gear_down;
                     std::cout << "[GEAR] " << (gear_down ? "DOWN and locked" : "UP")
                               << "\n";
                 }
@@ -674,6 +717,17 @@ int main(int argc, char* argv[]) {
                 if (ev.key.key == SDLK_F8) {
                     const int next_idx = (static_cast<int>(selected_aircraft) + 1) % 5;
                     switch_aircraft(static_cast<aircraft::AircraftType>(next_idx));
+                }
+                // Dogfight: new fight, cycle the set-up, cycle the bandit's skill.
+                if (ev.key.key == SDLK_F9 && !ev.key.repeat) start_dogfight_now();
+                if (ev.key.key == SDLK_F10 && !ev.key.repeat) {
+                    dogfight_setup.geometry = static_cast<sim::StartGeometry>(
+                        (static_cast<int>(dogfight_setup.geometry) + 1) % 4);
+                    start_dogfight_now();
+                }
+                if (ev.key.key == SDLK_F11 && !ev.key.repeat) {
+                    dogfight_setup.skill = static_cast<sim::AiSkill>((static_cast<int>(dogfight_setup.skill) + 1) % 3);
+                    start_dogfight_now();
                 }
                 // Quick throttle positions, so the pilot can slam to a detent
                 // without holding a key. These override a hardware lever only
@@ -720,6 +774,11 @@ int main(int argc, char* argv[]) {
                 case ui::MenuAction::RESUME_FLIGHT:
                     main_menu.close();
                     break;
+                case ui::MenuAction::START_DOGFIGHT:
+                    main_menu.close();
+                    flight_started = true;
+                    start_dogfight_now();
+                    break;
                 case ui::MenuAction::OPEN_MISSION_SELECT:
                     main_menu.close();
                     if (flight_started) renderer.menu().open(selected_aircraft);
@@ -735,11 +794,12 @@ int main(int argc, char* argv[]) {
         // Poll keyboard state for inceptors
         const bool* keys = SDL_GetKeyboardState(nullptr);
         const bool any_menu_open = renderer.menu().is_open() || main_menu.is_open();
-        auto held = [&](ui::InputAction a) { return ui::sdl::is_down(keys, controls.binding(a)); };
+        auto held = [&](ui::InputAction a) { return ui::sdl::is_down(keys, controls_cfg.binding(a)); };
         if (any_menu_open) {
             throttle_dir = 0.0; // A lever held while opening a menu must not keep moving
         }
-        if (keys && !is_crashed && !any_menu_open) {
+        bool trigger_held = false;
+        if (keys && !own->crashed && !any_menu_open) {
             target_pitch = 0.0;
             target_roll  = 0.0;
             target_yaw   = 0.0;
@@ -760,6 +820,7 @@ int main(int argc, char* argv[]) {
 
             // Wheel brakes for the rollout.
             wheel_braking = held(ui::InputAction::WHEEL_BRAKES);
+            trigger_held = held(ui::InputAction::FIRE_GUN);
         }
 
         // Compute delta time
@@ -789,11 +850,10 @@ int main(int argc, char* argv[]) {
         const auto t_physics = ProfileClock::now();
         constexpr double SIM_DT = 0.005;
         while (accumulator >= SIM_DT) {
-            prev_state = state;
-            if (!is_crashed) {
+            sim::AircraftControls controls{};
+            if (!own->crashed) {
                 flcs::PilotCommands pilot_cmd = input_mgr.update(SIM_DT);
 
-                // Latch onto the hardware throttle the first time it moves.
                 // Latch onto a hardware throttle only on a large, deliberate
                 // movement. A resting axis dithers by a few percent (and an
                 // uncalibrated one can sit anywhere), so a small threshold
@@ -824,127 +884,34 @@ int main(int argc, char* argv[]) {
 
                 // Pilot preferences: stick gain and pitch inversion apply to
                 // the blended command, so keyboard and hardware behave alike.
-                const double stick_gain = static_cast<double>(controls.stick_sensitivity) / 100.0;
+                const double stick_gain = static_cast<double>(controls_cfg.stick_sensitivity) / 100.0;
                 pilot_cmd.pitch_stick = std::clamp(pilot_cmd.pitch_stick * stick_gain, -1.0, 1.0);
                 pilot_cmd.roll_stick  = std::clamp(pilot_cmd.roll_stick * stick_gain, -1.0, 1.0);
-                if (controls.invert_pitch) pilot_cmd.pitch_stick = -pilot_cmd.pitch_stick;
+                if (controls_cfg.invert_pitch) pilot_cmd.pitch_stick = -pilot_cmd.pitch_stick;
 
-                // Air data
-                const auto air = environment::Atmosphere1976::compute(state.altitude(), state.airspeed());
-
-                // IMU measurement
-                current_imu = flcs::IMUData::read(state, current_forces, mass, air.dynamic_pressure);
-
-                // OFC intercept: overrides pilot_cmd if GLOC or Auto-GCAS is active
-                const flcs::PilotCommands effective_cmd =
-                    ofc.update(SIM_DT, state, current_imu, pilot_cmd, landing_gear.deployed);
-
-                // FLCS update (uses OFC-augmented commands, not raw pilot input)
-                auto surfaces = flight_control_system.update(
-                    SIM_DT, state, effective_cmd, air.dynamic_pressure, current_forces, mass
-                );
-
-                // Drive the speedbrake actuator toward the commanded switch
-                // position at its hydraulic slew rate (2.0 s full travel),
-                // then feed the resulting position to the aerodynamic model.
-                input_mgr.speedbrake.update(
-                    speedbrake_out ? input::SpeedbrakeController::SwitchPosition::EXTEND
-                                   : input::SpeedbrakeController::SwitchPosition::RETRACT,
-                    SIM_DT);
-                surfaces.speedbrake = input_mgr.speedbrake.position;
-
-                // Engine: detent schedule + altitude/Mach lapse + spool lag + fuel burn.
-                // Prefer a physical throttle lever, but only once it has actually
-                // been moved off its resting position. An unmoved or uncalibrated
-                // axis would otherwise pin the engine at idle and make the
-                // keyboard throttle appear dead.
-                double active_throttle = throttle;
-                if (hardware_throttle_active) {
-                    active_throttle = input_mgr.throttle_in;
-                }
-                // Auto-GCAS throttle authority: idle while still banking into
-                // wings-level, full power once actively pulling out. Overrides
-                // whatever lever position the pilot (or hardware throttle) commanded.
-                if (ofc.has_throttle_override()) {
-                    active_throttle = ofc.throttle_override_value();
-                }
-                engine.tvc_pitch_cmd = flight_control_system.tvc_pitch_cmd;
-                const double thrust_n = engine.update(active_throttle, air, SIM_DT);
-
-                // Burning fuel changes gross mass and inertia.
-                mass = fdm::FuelSystem::compute(engine.fuel_kg, selected_aircraft);
-
-                // Ground steering and braking from the rudder pedals / toe brakes.
-                landing_gear.steer_cmd = pilot_cmd.rudder_pedal;
+                controls.stick = pilot_cmd;
+                // Prefer a physical throttle lever, but only once it has
+                // actually been moved off its resting position. (Auto-GCAS
+                // throttle authority is applied inside the aircraft.)
+                controls.throttle = hardware_throttle_active ? input_mgr.throttle_in : throttle;
+                controls.speedbrake_out = speedbrake_out;
                 // Toe brakes: hardware pedals if present, otherwise the
                 // keyboard brake key applies both mains evenly.
                 const double kbd_brake = wheel_braking ? 1.0 : 0.0;
-                landing_gear.brake_left =
-                    (std::max)(input_mgr.brakes.effective_left(), kbd_brake);
-                landing_gear.brake_right =
-                    (std::max)(input_mgr.brakes.effective_right(), kbd_brake);
-
-                // Update environmental wind & continuous Dryden turbulence with true AGL
-                const double current_agl = environment::GroundCollision::get_agl(state);
-                wind_model.update(SIM_DT, current_agl, state.airspeed());
-
-                // RK4 step. Forces are re-evaluated at every stage from that
-                // stage's state with dynamic atmospheric wind and turbulence.
-                integrator.step(state, sim_time, mass,
-                    [&](double, const fdm::FlightState& s) noexcept -> fdm::AircraftForces {
-                        const double s_agl = environment::GroundCollision::get_agl(s);
-                        const math::Vector3 v_rel = wind_model.compute_relative_velocity(s.vel_b, s_agl, s.q_att);
-                        const double v_rel_norm = (std::max)(1.0, v_rel.norm());
-
-                        const auto stage_air = environment::Atmosphere1976::compute(
-                            s.altitude(), v_rel_norm);
-
-                        fdm::FlightState s_aero = s;
-                        s_aero.vel_b = v_rel;
-
-                        fdm::AircraftForces f = aero_model.compute_forces_and_moments(
-                            s_aero, surfaces, stage_air.dynamic_pressure, stage_air.mach_number);
-
-                        // Thrust acts along the body X axis, and engine pitch moment (A-10 nacelle / F-22 TVC)
-                        f.force_b.x += thrust_n;
-                        f.moment_b.y += engine.pitch_moment();
-
-                        // Ground reaction from the landing gear struts.
-                        const auto gear_f = landing_gear.compute(s, mass);
-                        f.force_b = f.force_b + gear_f.force_b;
-                        f.moment_b = f.moment_b + gear_f.moment_b;
-
-                        return f;
-                    });
-
-                // Record the forces acting at the new state for the IMU/HUD.
-                const double state_agl = environment::GroundCollision::get_agl(state);
-                const math::Vector3 v_rel_curr = wind_model.compute_relative_velocity(state.vel_b, state_agl, state.q_att);
-                fdm::FlightState state_aero = state;
-                state_aero.vel_b = v_rel_curr;
-                current_forces = aero_model.compute_forces_and_moments(
-                    state_aero, surfaces, air.dynamic_pressure, air.mach_number);
-                current_forces.force_b.x += thrust_n;
-                current_forces.moment_b.y += engine.pitch_moment();
-
-                // =========================================================================
-                // Ground Contact & Structural Integrity (Full-Terrain Collision)
-                // =========================================================================
-                if (!is_crashed) {
-                    const auto col_res = environment::GroundCollision::check_collision(
-                        state, selected_aircraft, landing_gear.deployed, landing_gear.collapsed);
-                    if (col_res.has_collided) {
-                        is_crashed = true;
-                    }
-                }
-
-                if (is_crashed) {
-                    environment::GroundCollision::clamp_to_surface(state);
-                    current_imu.Nz = 0.0;
-                }
+                controls.brake_left  = (std::max)(input_mgr.brakes.effective_left(), kbd_brake);
+                controls.brake_right = (std::max)(input_mgr.brakes.effective_right(), kbd_brake);
+                controls.trigger = trigger_held;
             }
 
-            sim_time += SIM_DT;
+            // One fixed step for every jet, round and rule in the sky.
+            if (dogfight_active) {
+                dogfight->step(SIM_DT, controls);
+            } else {
+                std::array<sim::AircraftControls, sim::World::kMaxAircraft> all{};
+                all[0] = controls;
+                free_world->step(SIM_DT, all);
+            }
+
             accumulator -= SIM_DT;
         }
 
@@ -965,7 +932,7 @@ int main(int argc, char* argv[]) {
         tel.aircraft_switch_timer = aircraft_switch_timer;
         const double shown_throttle = hardware_throttle_active ? input_mgr.throttle_in : throttle;
         tel.throttle_input = shown_throttle;
-        tel.net_thrust_n   = engine.net_thrust_n;
+        tel.net_thrust_n   = own->engine.net_thrust_n;
 
         // Propulsion spool rotor speed & core temperatures
         tel.engine_rpm_pct = 65.0 + 35.0 * std::clamp(shown_throttle, 0.0, 1.0)
@@ -977,37 +944,39 @@ int main(int argc, char* argv[]) {
         tel.hyd_press_a_psi  = 3000.0;
         tel.hyd_press_b_psi  = 3000.0;
 
-        switch (engine.detent_state) {
+        switch (own->engine.detent_state) {
             case input::ThrottleController::DetentState::CUTOFF:      tel.detent_str = "CUTOFF"; break;
             case input::ThrottleController::DetentState::IDLE:        tel.detent_str = "IDLE"; break;
             case input::ThrottleController::DetentState::MIL_POWER:   tel.detent_str = "MIL POWER"; break;
             case input::ThrottleController::DetentState::AFTERBURNER: tel.detent_str = "AFTERBURNER"; break;
         }
 
-        tel.fuel_remaining_kg = engine.fuel_kg;
-        tel.fuel_fraction     = engine.fuel_fraction();
+        tel.fuel_remaining_kg = own->engine.fuel_kg;
+        tel.fuel_fraction     = own->engine.fuel_fraction();
         tel.fuel_flow_kg_hr   = (shown_throttle > 0.85)
             ? (3200.0 + 8500.0 * (shown_throttle - 0.85) / 0.15)
             : (800.0 + 1600.0 * shown_throttle);
 
-        tel.gear_deployed     = landing_gear.deployed;
-        tel.gear_collapsed    = landing_gear.collapsed;
-        tel.gear_transit_pos  = landing_gear.deployed ? 1.0 : 0.0;
-        tel.brake_left        = landing_gear.brake_left;
-        tel.brake_right       = landing_gear.brake_right;
-        tel.on_ground         = landing_gear.weight_on_wheels() || (environment::GroundCollision::get_agl(state) <= 2.2);
+        const auto& gear = own->landing_gear;
+        tel.gear_deployed     = gear.deployed;
+        tel.gear_collapsed    = gear.collapsed;
+        tel.gear_transit_pos  = gear.deployed ? 1.0 : 0.0;
+        tel.brake_left        = gear.brake_left;
+        tel.brake_right       = gear.brake_right;
+        tel.on_ground         = gear.weight_on_wheels() || (environment::GroundCollision::get_agl(own->state) <= 2.2);
 
-        tel.speedbrake_pos    = input_mgr.speedbrake.position;
-        tel.is_crashed        = is_crashed;
-        tel.over_g_alert      = (std::abs(current_imu.Nz) > 8.5);
-        tel.high_aoa_alert    = (state.alpha() * (180.0 / M_PI) > 20.0);
-        tel.bingo_fuel_alert  = (engine.fuel_kg < 800.0);
-        tel.master_caution    = is_crashed || landing_gear.collapsed || tel.bingo_fuel_alert || tel.over_g_alert;
+        tel.speedbrake_pos    = own->speedbrake.position;
+        tel.is_crashed        = own->crashed;
+        tel.over_g_alert      = (std::abs(own->imu.Nz) > 8.5);
+        tel.high_aoa_alert    = (own->state.alpha() * (180.0 / M_PI) > 20.0);
+        tel.bingo_fuel_alert  = (own->engine.fuel_kg < 800.0);
+        tel.master_caution    = own->crashed || gear.collapsed || tel.bingo_fuel_alert || tel.over_g_alert;
 
         tel.is_hardware_hotas = hardware_throttle_active || (joy_driver->get_device_count() > 0);
         tel.input_name        = tel.is_hardware_hotas ? "HOTAS / JOYSTICK" : "KEYBOARD [SLEW]";
 
         // On-Board Flight Computer telemetry
+        const auto& ofc = own->ofc;
         tel.ofc_gloc_active        = ofc.is_gloc_active();
         tel.ofc_gcas_active        = ofc.is_gcas_active();
         tel.ofc_tumble_active      = ofc.is_tumble_active();
@@ -1015,22 +984,99 @@ int main(int argc, char* argv[]) {
         tel.ofc_gcas_tti_sec       = ofc.gcas_tti_seconds();
         tel.ofc_g_exposure         = ofc.g_exposure_value();
 
+        // Render interpolation across sub-steps (no temporal aliasing at any refresh rate).
+        const double render_alpha = std::clamp(accumulator / SIM_DT, 0.0, 1.0);
+        auto render_state_of = [render_alpha](const sim::Aircraft& a) {
+            return a.crashed ? a.state : fdm::FlightState::interpolate(a.prev_state, a.state, render_alpha);
+        };
+
+        // Dogfight: the bandit, tracers and the combat HUD.
+        renderer.clear_traffic();
+        renderer.clear_tracers();
+        if (dogfight_active) {
+            const sim::World& w = dogfight->world;
+            const sim::Aircraft& bandit = dogfight->bandit();
+            renderer.add_traffic(render_state_of(bandit), bandit.landing_gear.deployed);
+            // One round in five is a tracer, as in a real belt.
+            for (int r = 0; r < sim::World::kMaxRounds; r += 5) {
+                const sim::Projectile& p = w.rounds[static_cast<size_t>(r)];
+                if (p.active) renderer.add_tracer(p.pos, p.pos - p.vel * 0.02);
+            }
+
+            // Hits scored since the last frame light the HIT cue.
+            for (; dogfight_events_read < w.event_count(); ++dogfight_events_read) {
+                const sim::CombatEvent& e = w.event(dogfight_events_read);
+                if (e.kind == sim::CombatEvent::Kind::HIT && e.shooter == sim::Engagement::OWN) hit_cue_timer = 0.6;
+                if (e.kind == sim::CombatEvent::Kind::HIT && e.victim == sim::Engagement::OWN) {
+                    std::cout << "[DOGFIGHT] Hit taken: " << sim::to_string(e.zone) << "\n";
+                }
+            }
+            hit_cue_timer = (std::max)(0.0, hit_cue_timer - frame_dt);
+
+            auto& c = tel.combat;
+            c.active = true;
+            const auto geo = sim::AirCombatGeometry::compute(own->state, bandit.state);
+            c.target_valid = bandit.alive() || !bandit.crashed;
+            if (geo.range > 1.0) {
+                const math::Vector3 d = geo.los_b / geo.range;
+                c.target_dir_b[0] = d.x; c.target_dir_b[1] = d.y; c.target_dir_b[2] = d.z;
+            }
+            c.target_range_m = geo.range;
+            c.closure_mps = geo.closure;
+            c.aspect_deg = geo.aspect * 180.0 / M_PI;
+            c.ata_deg = geo.ata * 180.0 / M_PI;
+            const auto sol = sim::GunSolution::compute(own->state, own->gun.spec, bandit.position(),
+                                                       bandit.velocity(), bandit.acceleration());
+            c.pipper_valid = sol.valid && bandit.alive();
+            if (sol.valid) {
+                const math::Vector3 p = own->state.q_att.rotate_ned_to_body(sol.pipper_ned - own->state.pos_ned);
+                const double n = (std::max)(1.0, p.norm());
+                c.pipper_dir_b[0] = p.x / n; c.pipper_dir_b[1] = p.y / n; c.pipper_dir_b[2] = p.z / n;
+            }
+            c.gun_max_range_m = 1200.0;
+            c.in_gun_range = geo.range < c.gun_max_range_m;
+            c.ammo = own->gun.ammo;
+            c.gun_firing = own->gun.firing();
+            std::snprintf(c.gun_name, sizeof(c.gun_name), "GUN");
+            const auto energy = sim::EnergyState::compute(own->state, own->forces, own->mass);
+            c.turn_rate_dps = energy.turn_rate * 180.0 / M_PI;
+            c.ps_mps = energy.ps;
+            c.hits_scored = dogfight->stats.hits_scored;
+            c.hits_taken = dogfight->stats.hits_taken;
+            c.hit_cue_s = hit_cue_timer;
+            const auto& dmg = own->damage;
+            c.engine_damage = dmg.damaged() && dmg.thrust_factor() < 0.999;
+            c.engine_fire = dmg.engine_fire;
+            c.fuel_leak = dmg.fuel_leak_kgs > 0.0;
+            c.control_damage = dmg.wing_left < 1.0 || dmg.wing_right < 1.0 || dmg.tail < 1.0;
+            const auto bandit_name = aircraft::to_short_string(dogfight_setup.bandit_type);
+            std::snprintf(c.status, sizeof(c.status), "%s %.*s  %s", sim::to_string(dogfight_setup.skill),
+                          static_cast<int>(bandit_name.size()), bandit_name.data(),
+                          sim::to_string(dogfight_setup.geometry));
+            if (dogfight->finished()) {
+                std::snprintf(c.banner, sizeof(c.banner), "%s", sim::to_string(dogfight->outcome));
+                const auto& st = dogfight->stats;
+                std::snprintf(c.debrief, sizeof(c.debrief), "HITS %d  ROUNDS %d  TAKEN %d  TIME %d SEC  PEAK %.1fG",
+                              st.hits_scored, st.rounds_fired, st.hits_taken, static_cast<int>(st.duration_s),
+                              st.peak_g);
+            }
+        }
+
         // Update procedural audio engine with real-time acoustics
-        const auto air_now = environment::Atmosphere1976::compute(state.altitude(), state.airspeed());
-        audio_engine.update(tel, air_now.dynamic_pressure, state.airspeed(), frame_dt);
+        const auto air_now = environment::Atmosphere1976::compute(own->state.altitude(), own->state.airspeed());
+        audio_engine.update(tel, air_now.dynamic_pressure, own->state.airspeed(), frame_dt);
 
         // Render Frame with in-cockpit telemetry and live hardware calibration state
-        // Interpolate state across sub-steps to eliminate temporal aliasing and micro-stutter at any display refresh rate
-        const double render_alpha = std::clamp(accumulator / SIM_DT, 0.0, 1.0);
-        const fdm::FlightState render_state = is_crashed ? state : fdm::FlightState::interpolate(prev_state, state, render_alpha);
+        const fdm::FlightState render_state = render_state_of(*own);
         const auto t_render = ProfileClock::now();
-        renderer.render_frame(frame_dt, render_state, current_imu, is_crashed, tel, &input_mgr.config, &input_mgr);
+        renderer.render_frame(frame_dt, render_state, own->imu, own->crashed, tel, &input_mgr.config, &input_mgr);
         const auto t_render_end = ProfileClock::now();
 
         // Main / pause menu composited over the (paused) scene
         if (main_menu.is_visible()) {
             main_menu.set_status_text(upper(std::string(aircraft::to_string(selected_aircraft))) +
-                                      (flight_started ? "  /  FLIGHT PAUSED" : "  /  RUNWAY 09 LINE-UP"));
+                                      (dogfight_active ? "  /  DOGFIGHT PAUSED"
+                                       : flight_started ? "  /  FLIGHT PAUSED" : "  /  RUNWAY 09 LINE-UP"));
         }
         main_menu.update(static_cast<float>(frame_dt), static_cast<float>(pixel_w), static_cast<float>(pixel_h));
         if (main_menu.is_visible()) {
