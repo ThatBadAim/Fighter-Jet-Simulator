@@ -468,6 +468,194 @@ public:
         }
     }
 
+    /// @brief Left MFD, FCR page: the APG-68 B-scope in CRM (RWS / STT).
+    ///
+    /// Laid out like the F-16's colour MFD: OSB legends round the edge (mode
+    /// top left, range scale with its bump arrows and the azimuth/bar settings
+    /// down the left, page selectors along the bottom), the scope in the
+    /// middle with range on the vertical axis and azimuth across it, the
+    /// artificial horizon, antenna azimuth and elevation carets, and the
+    /// acquisition cursor with the altitude block the scan covers at its
+    /// range. RWS shows bricks only; STT adds the target's velocity vector,
+    /// its altitude and the aspect / heading / speed / closure data line.
+    void draw_fcr(const RadarTelemetry& r) {
+        const Color4 glass{0.008f, 0.012f, 0.010f, 1.0f};
+        const Color4 ink{0.30f, 1.0f, 0.38f, 1.0f};
+        const Color4 dim{0.10f, 0.44f, 0.15f, 1.0f};
+        const Color4 brick_col[3] = {{0.82f, 1.0f, 0.84f, 1.0f}, {0.46f, 0.70f, 0.50f, 1.0f},
+                                     {0.26f, 0.42f, 0.29f, 1.0f}};
+        constexpr float TS = 0.072f;   // legend text size
+        // Scope: azimuth across [-SX, SX], range up from Y0 to Y1.
+        constexpr float SX = 0.72f, Y0 = -0.72f, Y1 = 0.70f;
+        constexpr float YM = 0.5f * (Y0 + Y1);
+        constexpr float OSB[5] = {-0.64f, -0.32f, 0.0f, 0.32f, 0.64f};
+
+        add_rect(0.0f, 0.0f, 2.0f, 2.0f, glass);
+        auto seg = [&](float x0, float y0, float x1, float y1, const Color4& c, float w = 0.009f) {
+            add_bar(x0, y0, x1, y1, w, c);
+        };
+        auto az_x = [&](double az_deg) {
+            return static_cast<float>(std::clamp(az_deg / r.az_limit_deg, -1.0, 1.0)) * SX;
+        };
+        auto range_y = [&](double nm) {
+            return Y0 + static_cast<float>(std::clamp(nm / r.range_scale_nm, 0.0, 1.0)) * (Y1 - Y0);
+        };
+        auto in_scope = [&](double nm) { return nm >= 0.0 && nm <= r.range_scale_nm; };
+        auto boxed = [&](const char* s, float x, float y, const Color4& c) {
+            const float w = text_width(s, TS) + 0.035f;
+            draw_text(s, x, y, TS, c, 0);
+            const float b = y - 0.022f, t = y + 0.068f;
+            seg(x - 0.5f * w, b, x + 0.5f * w, b, c, 0.007f);
+            seg(x - 0.5f * w, t, x + 0.5f * w, t, c, 0.007f);
+            seg(x - 0.5f * w, b, x - 0.5f * w, t, c, 0.007f);
+            seg(x + 0.5f * w, b, x + 0.5f * w, t, c, 0.007f);
+        };
+
+        // OSB legends: mode row along the top, page selectors along the bottom.
+        const bool stt = r.mode == 2;
+        draw_text("CRM", OSB[0], 0.875f, TS, ink, 0);
+        draw_text(stt ? "STT" : "RWS", OSB[1], 0.875f, TS, ink, 0);
+        draw_text("NORM", OSB[2], 0.875f, TS, ink, 0);
+        draw_text("OVRD", OSB[3], 0.875f, TS, ink, 0);
+        draw_text("CNTL", OSB[4], 0.875f, TS, ink, 0);
+        draw_text("DCLT", OSB[0], -0.935f, TS, ink, 0);
+        draw_text("SWAP", OSB[1], -0.935f, TS, ink, 0);
+        boxed("FCR", OSB[2], -0.935f, ink);
+        draw_text("FLCS", OSB[3], -0.935f, TS, ink, 0);
+        draw_text("SMS", OSB[4], -0.935f, TS, ink, 0);
+
+        if (!r.fitted || r.mode == 0) {
+            draw_text(r.fitted ? "RDR OFF" : "NO RADAR", 0.0f, -0.02f, 0.10f, ink, 0);
+            return;
+        }
+
+        // Range scale and its bump arrows (OSB 20/19), azimuth and bars (OSB 18/17).
+        {
+            const float x = -0.905f;
+            add_tri(x, OSB[4] + 0.035f, x - 0.035f, OSB[4] - 0.025f, x + 0.035f, OSB[4] - 0.025f, ink);
+            add_tri(x, OSB[3] - 0.035f, x - 0.035f, OSB[3] + 0.025f, x + 0.035f, OSB[3] + 0.025f, ink);
+            char buf[8];
+            std::snprintf(buf, sizeof(buf), "%d", static_cast<int>(r.range_scale_nm + 0.5));
+            draw_text(buf, x, 0.5f * (OSB[3] + OSB[4]) - 0.025f, TS, ink, 0);
+            std::snprintf(buf, sizeof(buf), "A%d", static_cast<int>(r.az_limit_deg / 10.0 + 0.5));
+            draw_text(buf, -0.965f, OSB[2] - 0.025f, TS, ink);
+            std::snprintf(buf, sizeof(buf), "%dB", r.bars);
+            draw_text(buf, -0.965f, OSB[1] - 0.025f, TS, ink);
+        }
+
+        // Range tics at quarter scale on both edges, azimuth tics every 30 deg.
+        for (int q = 1; q <= 3; ++q) {
+            const float y = Y0 + (Y1 - Y0) * 0.25f * static_cast<float>(q);
+            const float len = q == 2 ? 0.06f : 0.035f;
+            seg(-SX, y, -SX + len, y, dim);
+            seg(SX - len, y, SX, y, dim);
+        }
+        for (int a = -60; a <= 60; a += 30) {
+            const float x = az_x(a);
+            seg(x, Y1 - 0.04f, x, Y1, dim);
+            seg(x, Y0, x, Y0 + 0.04f, dim);
+        }
+
+        // Artificial horizon, with the usual centre gap, clipped to the scope.
+        {
+            // Bank right and the horizon rolls the other way: its right end rises.
+            const float roll = static_cast<float>(r.roll_deg * kPi / 180.0);
+            const float drop = static_cast<float>(std::clamp(r.pitch_deg, -60.0, 60.0)) * 0.0115f;
+            const float c = std::cos(roll), s = std::sin(roll);
+            const float cx = drop * s, cy = YM - drop * c;
+            auto clipped = [&](float a0, float a1) {
+                float x0 = cx + a0 * c, y0 = cy + a0 * s, x1 = cx + a1 * c, y1 = cy + a1 * s;
+                if (clip_to(x0, y0, x1, y1, -SX, Y0, SX, Y1)) seg(x0, y0, x1, y1, ink, 0.008f);
+            };
+            clipped(-0.58f, -0.14f);
+            clipped(0.14f, 0.58f);
+        }
+
+        // Antenna carets: azimuth under the scope, elevation left of it (+/-60 deg scale).
+        {
+            const float x = az_x(r.ant_az_deg);
+            seg(x, Y0 - 0.02f, x, Y0 - 0.075f, ink);
+            seg(x - 0.025f, Y0 - 0.075f, x + 0.025f, Y0 - 0.075f, ink);
+            const float ex = -SX - 0.03f;
+            for (int e = -40; e <= 40; e += 20) {
+                const float y = YM + static_cast<float>(e) / 60.0f * 0.5f * (Y1 - Y0);
+                seg(ex - (e == 0 ? 0.03f : 0.015f), y, ex, y, dim, 0.007f);
+            }
+            const float y = YM + static_cast<float>(std::clamp(r.ant_el_deg, -60.0, 60.0) / 60.0) * 0.5f * (Y1 - Y0);
+            seg(ex - 0.055f, y, ex - 0.005f, y, ink);
+            seg(ex - 0.055f, y - 0.025f, ex - 0.055f, y + 0.025f, ink);
+        }
+
+        char buf[16];
+        if (!stt) {
+            // Search bricks, dimmer with age.
+            for (int i = 0; i < r.hit_count; ++i) {
+                const auto& h = r.hits[i];
+                if (!in_scope(h.range_nm)) continue;
+                add_rect(az_x(h.az_deg), range_y(h.range_nm), 0.052f, 0.030f,
+                         brick_col[std::clamp(h.age, 0, 2)]);
+            }
+            // Acquisition cursor and the altitude block covered at its range.
+            const float cx = az_x(r.cursor_az_deg), cy = range_y(r.cursor_range_nm);
+            seg(cx - 0.042f, cy - 0.04f, cx - 0.042f, cy + 0.04f, ink, 0.008f);
+            seg(cx + 0.042f, cy - 0.04f, cx + 0.042f, cy + 0.04f, ink, 0.008f);
+            const float tx = cx > 0.45f ? cx - 0.07f : cx + 0.07f;
+            const int align = cx > 0.45f ? 1 : -1;
+            std::snprintf(buf, sizeof(buf), "%02d", std::clamp(r.cov_top_kft, -99, 99));
+            draw_text(buf, tx, cy + 0.008f, 0.058f, ink, align);
+            std::snprintf(buf, sizeof(buf), "%02d", std::clamp(r.cov_bottom_kft, -99, 99));
+            draw_text(buf, tx, cy - 0.058f, 0.058f, ink, align);
+            return;
+        }
+
+        // STT data line: aspect, target track, ground speed, closure.
+        std::snprintf(buf, sizeof(buf), "%02d%c", r.aspect_tens, r.aspect_side);
+        draw_text(buf, -0.60f, 0.755f, TS, ink, 0);
+        std::snprintf(buf, sizeof(buf), "%03d", static_cast<int>(std::lround(r.tgt_heading_deg)) % 360);
+        draw_text(buf, -0.20f, 0.755f, TS, ink, 0);
+        std::snprintf(buf, sizeof(buf), "%d", static_cast<int>(std::lround(r.tgt_gs_kt)));
+        draw_text(buf, 0.20f, 0.755f, TS, ink, 0);
+        std::snprintf(buf, sizeof(buf), "%+d", static_cast<int>(std::lround(r.closure_kt)));
+        draw_text(buf, 0.60f, 0.755f, TS, ink, 0);
+
+        // The tracked target: filled square, velocity vector, altitude below.
+        // On memory it flashes.
+        if (in_scope(r.tgt_range_nm) && (!r.track_memory || r.blink)) {
+            const float x = az_x(r.tgt_az_deg), y = range_y(r.tgt_range_nm);
+            add_rect(x, y, 0.050f, 0.050f, ink);
+            const float a = static_cast<float>(r.tgt_rel_heading_deg * kPi / 180.0);
+            const float len = 0.035f + 0.14f * static_cast<float>(std::clamp(r.tgt_gs_kt / 600.0, 0.0, 1.5));
+            seg(x, y, x + std::sin(a) * len, y + std::cos(a) * len, ink);
+            // Altitude beside the symbol, on the side the vector does not take.
+            std::snprintf(buf, sizeof(buf), "%02d", static_cast<int>(std::lround(std::clamp(r.tgt_alt_kft, 0.0, 99.0))));
+            const bool right = std::sin(a) < 0.0f;
+            draw_text(buf, right ? x + 0.045f : x - 0.045f, y - 0.085f, 0.060f, ink, right ? -1 : 1);
+        }
+    }
+
+    /// @brief Liang-Barsky: clip a segment to a rectangle; false if none is left.
+    static bool clip_to(float& x0, float& y0, float& x1, float& y1, float xmin, float ymin, float xmax,
+                        float ymax) noexcept {
+        const float dx = x1 - x0, dy = y1 - y0;
+        float t0 = 0.0f, t1 = 1.0f;
+        const float p[4] = {-dx, dx, -dy, dy};
+        const float q[4] = {x0 - xmin, xmax - x0, y0 - ymin, ymax - y0};
+        for (int i = 0; i < 4; ++i) {
+            if (p[i] == 0.0f) {
+                if (q[i] < 0.0f) return false;
+                continue;
+            }
+            const float t = q[i] / p[i];
+            if (p[i] < 0.0f) t0 = std::max(t0, t);
+            else t1 = std::min(t1, t);
+            if (t0 > t1) return false;
+        }
+        const float ox = x0, oy = y0;
+        x0 = ox + t0 * dx; y0 = oy + t0 * dy;
+        x1 = ox + t1 * dx; y1 = oy + t1 * dy;
+        return true;
+    }
+
     /// @brief Update every instrument display and render off-screen to the atlas texture
     void update_and_render(const fdm::FlightState& state, const AvionicsTelemetry& telemetry = AvionicsTelemetry{}) {
         if (!initialized_) return;
@@ -479,7 +667,8 @@ public:
         const float row_cy = centre_page_ ? 0.5f : 0.0f;
         const float row_hh = centre_page_ ? 0.5f : 1.0f;
         set_panel_viewport(-0.5f, row_cy, 0.5f, row_hh);
-        draw_left_mfd(state, telemetry);
+        if (telemetry.radar.page_fcr) draw_fcr(telemetry.radar);
+        else draw_left_mfd(state, telemetry);
 
         set_panel_viewport(0.5f, row_cy, 0.5f, row_hh);
         draw_right_mfd(state, telemetry);

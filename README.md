@@ -207,6 +207,31 @@ The frame itself is GPU-bound: physics costs about 3 µs per 200 Hz step and the
 - **GPU savings with unchanged images** (verified by pixel diff): the cockpit interior is drawn before the hull so early-Z rejects the hidden hull; the display atlases have no unused depth buffer, the MFD atlas is sized to the screens the asset cockpit has, and neither redraws in the chase view. At 1080p Ultra that is about +13% frame rate in both views.
 - **`--profile`** prints the frame-time distribution, CPU time per loop stage and GPU time per render pass (timestamp queries that never stall, [`gpu_profiler.hpp`](include/fastjet/graphics/gpu_profiler.hpp)) every two seconds.
 
+### 12. Evade Mode: Surviving a Missile Shot
+
+From the main menu (**EVADE**) or `--evade [easy|medium|hard|expert]`: a bandit starts in your six and hunts you with radar missiles and his gun. You win by outlasting his fuel, by leaving him with nothing to shoot, by getting away, or by shooting him down. Every level flies the same physics. Difficulty changes the pilot, his missile load, his launch discipline and his head start ([`engagement.hpp`](include/fastjet/sim/engagement.hpp)):
+
+| Level | Bandit | Weapons | Start | Shoots when |
+|---|---|---|---|---|
+| EASY | Novice | Gun | 3 nm astern, co-speed | In gun range |
+| MEDIUM | Veteran | 2 × AIM-120 + gun | 10 nm, +300 m, +20 m/s | The missile can reach you if you hold course (Rmax) |
+| HARD | Ace | 4 × AIM-120 + gun | 6.5 nm, +600 m, +40 m/s | You can't outrun it even turning cold in reheat (no-escape zone) |
+| EXPERT | Ace | 4 × AIM-120, two per shot | 6 nm, +900 m, +60 m/s | No-escape, two-missile salvo |
+
+- **Missile** ([`missile.hpp`](include/fastjet/sim/missile.hpp)): an AIM-120C-class point mass with a 5 s boost to Mach 3+, Mach-dependent drag, induced drag from the G it pulls, a 40 G airframe limit and a lift limit from dynamic pressure (a slow missile can't turn), a 0.2 s autopilot lag and proportional navigation. Guidance goes datalink → inertial → active seeker, which searches a basket around the predicted target. It has a proximity fuze and a blast-fragmentation warhead that feeds the component damage model.
+- **Radar and RWR** ([`radar.hpp`](include/fastjet/sim/radar.hpp)): the bandit's radar searches, locks after the operator's acquisition time, coasts on memory through dropouts and loses lock outside its gimbal or range. Radars and seekers are pulse-doppler, so a target flying 90° to the line of sight with ground behind it sits in the clutter **notch** and disappears. Chaff blooms into the tracker's range, angle and doppler gates, so it only works when you are beaming. Your RWR hears the search, the lock and the launch. The A-10 has no air-to-air radar.
+- **Launch decisions** ([`missile_shooter.hpp`](include/fastjet/sim/missile_shooter.hpp)) fly the missile's own dynamics and guidance forward from the radar track, so a shot is only taken when the missile can get there. The test requires the prediction to match the live missile exactly.
+- **Cockpit**: the RWR azimuth scope on the upper-left panel shows the emitter ("16"), a lock diamond and a flashing "M" for an inbound missile. The HUD shows `LOCK 6` / `LAUNCH 6` (clock bearing) and the chaff count. The headset carries the RWR tones: three chirps for a new emitter, a steady beep-beep while you are locked, and a fast warble while a missile is guided at you.
+- **What works is what works in the jet**: fly straight and you die at every level. Running in reheat drags a max-range shot out of energy but not a no-escape shot. Against those, beam the missile (put it at 3 or 9 o'clock), get low so there's ground behind you, chaff while beaming, and break hard across its line of sight in the last second or two. [`evasion_pilot.hpp`](include/fastjet/sim/evasion_pilot.hpp) flies exactly that from the RWR alone (`--evade hard --watch`). Across 24 seeds it survives the EASY/MEDIUM/HARD/EXPERT bandit 24/15/6/2 times.
+
+### 13. Fire-Control Radar (FCR Page)
+
+The left MFD shows the F-16's APG-68-class radar page ([`radar_scope.hpp`](include/fastjet/sim/radar_scope.hpp), drawn in [`flight_instruments.hpp`](include/fastjet/graphics/flight_instruments.hpp)), in every mode and for every jet except the A-10, which has no air-to-air radar. It is a B-scope: azimuth across (±60°), range up from your jet at the bottom edge.
+
+- **RWS search** sweeps a beam stabilised against roll and pitch through a 4-bar, ±60° pattern at 65°/s, so one full scan takes about 7.4 s. A jet shows as a brick only when the beam crosses it and the radar can actually see it. It has to be inside the scan volume and detection range, and outside the doppler notch: a jet beaming you with ground behind it vanishes, as it does from the bandit's radar. Bricks stay where the jet was painted and fade over three frames. RWS tells you nothing about heading, speed or height.
+- **Around the scope**: the OSB labels (`CRM`/`RWS`, range scale with its arrows, `A6`, `4B`), an artificial horizon, and the antenna azimuth and elevation carets. The acquisition cursor sits on the nearest newest brick, and the two numbers beside it are the top and bottom of the altitude block the scan covers at that range, in thousands of feet. A jet above or below that block is invisible until you move the antenna with `=` / `-`.
+- **STT**: `L` locks the brick under the cursor through the jet's own radar, so the other jet's RWR hears the lock. The target gets a filled square with a velocity vector and its altitude. The top line shows aspect (`15L`: 150° off the target's tail, you on its left), its track, its ground speed and the closure in knots. The range scale follows the target. Through a notch the lock coasts on memory and the symbol flashes. If the lock breaks, the radar goes back to RWS and waits for you to lock again.
+
 ---
 
 ## Directory Structure
@@ -347,7 +372,7 @@ make viewer
 | Arrow Keys | Pitch and roll stick commands |
 | A / D | Rudder pedals (also nosewheel steering on the ground) |
 | Shift / Ctrl | Throttle increase / decrease (1.5 s idle to full reheat) |
-| `+` / `-`, keypad `+` / `-`, PageUp / PageDown | Alternative throttle bindings |
+| PageUp / PageDown | Alternative throttle bindings |
 | I | Invert hardware throttle axis (toggle forward=full power vs forward=cutoff) |
 | J | Ignore a hardware throttle lever (keyboard only) |
 | 1 / 2 / 3 / 4 | Snap throttle to Cutoff / Idle / Military / Max afterburner |
@@ -355,7 +380,14 @@ make viewer
 | Space | Wheel brakes, for the rollout |
 | G | Landing gear up / down |
 | T | Trim reset |
-| R | Reset simulation |
+| R | Reset simulation (in a fight: restart it) |
+| F | Fire gun |
+| C | Dispense chaff (two bundles per press) |
+| L | Radar: lock the contact under the cursor (STT) / drop the lock |
+| `[` / `]` | Radar range scale down / up (10, 20, 40, 80 nm) |
+| `=` / `-` | Radar antenna elevation up / down (hold) |
+| P | Left MFD page: FCR radar / FLCS |
+| F9 / F10 / F11 | New fight / cycle set-up (merge, perch, range, evade) / cycle bandit skill or evade difficulty |
 | Esc | Exit |
 
 Run with `--profile` to print frame timing and the GPU cost of each render pass every two seconds.
@@ -387,6 +419,9 @@ make test_atmosphere         # Validates atmosphere properties across tropospher
 make test_ballistic          # Validates trajectory against closed-form analytical equations
 make test_gyroscopic         # Validates torque-free angular momentum conservation
 make test_performance        # Validates zero heap allocation and measures throughput
+make test_missiles           # Validates missile kinematics, PN, launch zones, notch, chaff, radar lock and RWR
+make test_evade_mode         # Validates evade set-ups, lock warning, end rules and what defeats each difficulty
+make test_radar_scope        # Validates the FCR scan, what it can see, STT lock and range scales
 ```
 
 ---

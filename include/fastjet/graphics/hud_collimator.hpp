@@ -800,6 +800,12 @@ public:
         std::snprintf(buf, sizeof(buf), "%s %d", c.gun_name, c.ammo);
         draw_string(buf, rx, ry, D * 0.008f, -D, c.ammo > 0 ? hud_col : amber);
         if (c.gun_firing) draw_string("FIRE", rx + D * 0.045f, ry, D * 0.008f, -D, hud_col);
+        if (c.chaff >= 0) {
+            ry -= line;
+            std::snprintf(buf, sizeof(buf), "CHF %d", c.chaff);
+            draw_string(buf, rx, ry, D * 0.008f, -D, c.chaff > 0 ? hud_col : amber);
+        }
+        if (c.rwr_active) build_rwr(c, hud_col, D);
 
         // Energy readouts under the G-meter: turn rate [deg/s] and Ps [ft/s].
         const float lx = -D * std::tan(0.082f) - D * 0.015f;
@@ -822,9 +828,30 @@ public:
         if (c.banner[0]) {
             const float by = D * std::tan(0.060f);
             draw_string_centered(c.banner, 0.0f, by, D * 0.015f, -D, amber);
-            if (c.debrief[0]) draw_string_centered(c.debrief, 0.0f, by - D * 0.022f, D * 0.008f, -D, amber);
-            draw_string_centered("F9 NEW FIGHT", 0.0f, by - D * 0.036f, D * 0.008f, -D, amber);
+            float dy = D * 0.022f;
+            if (c.debrief[0]) draw_string_centered(c.debrief, 0.0f, by - dy, D * 0.008f, -D, amber);
+            if (c.debrief2[0]) {
+                dy += D * 0.013f;
+                draw_string_centered(c.debrief2, 0.0f, by - dy, D * 0.008f, -D, amber);
+            }
+            draw_string_centered("F9 NEW FIGHT", 0.0f, by - dy - D * 0.014f, D * 0.008f, -D, amber);
         }
+    }
+
+    /// @brief Threat cue under the heading tape: LOCK (steady amber) while a
+    /// radar holds you, LAUNCH (flashing red) while a guided missile is inbound,
+    /// with the threat's clock bearing ("LAUNCH 6"). The azimuth picture itself is on
+    /// the RWR scope on the instrument panel.
+    void build_rwr(const CombatTelemetry& c, const Color4& /*hud_col*/, float D) {
+        if (c.rwr_level < 2) return;
+        const bool launch = c.rwr_level >= 3;
+        if (launch && !c.blink) return;
+        const double bearing = launch && c.rwr_missile_valid ? c.rwr_missile_bearing_deg : c.rwr_emitter_bearing_deg;
+        int clock = static_cast<int>(std::lround(std::fmod(bearing + 360.0, 360.0) / 30.0)) % 12;
+        if (clock == 0) clock = 12;
+        char buf[24];
+        std::snprintf(buf, sizeof(buf), "%s %d", launch ? "LAUNCH" : "LOCK", clock);
+        draw_string_centered(buf, 0.0f, D * 0.084f, D * 0.009f, -D, launch ? Color4::red() : Color4::amber());
     }
 
     /// @brief Render collimated symbology that is masked to the physical combiner glass

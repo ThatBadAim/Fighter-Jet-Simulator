@@ -43,6 +43,7 @@ enum class Gauge : int {
     WARN_4,     ///< TO/LDG CONFIG
     WARN_5,     ///< CANOPY / OXY LOW
     GEAR_LAMP,  ///< Gear-down lamp (shared by all three)
+    RWR,        ///< Radar warning receiver azimuth indicator
     COUNT
 };
 
@@ -103,6 +104,7 @@ public:
             {1600, 512, 192, 192, true},   // WARN_4
             {1792, 512, 192, 192, true},   // WARN_5
             {0, 768, 128, 128, true},      // GEAR_LAMP
+            {256, 768, 256, 256, true},    // RWR
         }};
         return kCells[static_cast<size_t>(g)];
     }
@@ -147,6 +149,15 @@ public:
         bool flcs = false;
         bool config = false;
         bool gear_green = false;
+        // RWR: bearings clockwise from the nose [deg]
+        bool rwr_on = false;
+        int rwr_level = 0;
+        bool rwr_emitter = false;
+        double rwr_emitter_deg = 0.0;
+        char rwr_symbol[4] = "";
+        bool rwr_missile = false;
+        double rwr_missile_deg = 0.0;
+        bool blink = false;
     };
 
     CockpitGauges() = default;
@@ -190,6 +201,7 @@ public:
         in_cell(Gauge::WARN_4);    draw_lamp("TO/LDG", r_.config, "CONFIG", r_.config);
         in_cell(Gauge::WARN_5);    draw_lamp("CANOPY", false, "OXY LOW", false);
         in_cell(Gauge::GEAR_LAMP); draw_gear_lamp();
+        in_cell(Gauge::RWR);       draw_rwr();
         // Cells are cleared to transparent: the cockpit shows through
         // wherever a face does not paint (round dials' corners, bezels).
         render_canvas(Color4{0.0f, 0.0f, 0.0f, 0.0f});
@@ -299,6 +311,16 @@ private:
         r_.config = tel.gear_collapsed ||
                     (!tel.gear_deployed && !tel.on_ground && t.alt_ft < 10000.0 && kcas < 190.0 && fpm < -250.0);
         r_.gear_green = tel.gear_deployed && !tel.gear_collapsed && tel.gear_transit_pos >= 0.98;
+
+        const CombatTelemetry& c = tel.combat;
+        r_.rwr_on = c.active && c.rwr_active;
+        r_.rwr_level = c.rwr_level;
+        r_.rwr_emitter = c.rwr_emitter_valid;
+        r_.rwr_emitter_deg = c.rwr_emitter_bearing_deg;
+        std::snprintf(r_.rwr_symbol, sizeof(r_.rwr_symbol), "%s", c.rwr_symbol);
+        r_.rwr_missile = c.rwr_missile_valid;
+        r_.rwr_missile_deg = c.rwr_missile_bearing_deg;
+        r_.blink = c.blink;
     }
 
     // ---- Cell and geometry helpers -----------------------------------------
@@ -924,6 +946,48 @@ private:
         const float size_b = std::min(0.40f, 1.70f / std::max(0.1f, text_width(bottom, 1.0f)));
         text_at(top, 0.0f, 0.46f, size_top, top_on ? ink_on : ink_off);
         text_at(bottom, 0.0f, -0.46f, size_b, bottom_on ? ink_on : ink_off);
+    }
+
+    // ---- RWR ---------------------------------------------------------------
+    /// Threat warning azimuth indicator: a green CRT seen from above, own jet
+    /// at the centre, nose up. Emitters sit at their bearing; the more lethal
+    /// a threat, the nearer the centre it is drawn, as on the real display.
+    /// A locking radar is boxed in the priority diamond. An inbound missile
+    /// is an "M" in a flashing diamond. The scope is blank unless the combat
+    /// systems are running.
+    void draw_rwr() {
+        const Color4 glass{0.004f, 0.020f, 0.008f, 1.0f};
+        const Color4 grid{0.08f, 0.32f, 0.13f, 1.0f};
+        const Color4 ink{0.40f, 1.0f, 0.50f, 1.0f};
+        const Color4 red{1.0f, 0.30f, 0.20f, 1.0f};
+        add_circle(0.0f, 0.0f, 1.0f, kRim, 64);
+        add_circle(0.0f, 0.0f, 0.94f, glass, 64);
+        if (!r_.rwr_on) return;
+        add_ring(0.0f, 0.0f, 0.86f, 0.89f, grid, 64);
+        add_ring(0.0f, 0.0f, 0.44f, 0.46f, grid, 48);
+        for (int q = 0; q < 12; ++q) tick(static_cast<float>(q) * 30.0f, 0.89f, q % 3 == 0 ? 0.12f : 0.06f, 0.025f, grid);
+        // Own jet
+        add_bar(0.0f, -0.10f, 0.0f, 0.12f, 0.035f, ink);
+        add_bar(-0.10f, 0.02f, 0.10f, 0.02f, 0.035f, ink);
+        add_bar(-0.05f, -0.09f, 0.05f, -0.09f, 0.03f, ink);
+
+        auto diamond = [&](float x, float y, float h, const Color4& col) {
+            add_bar(x, y + h, x + h, y, 0.03f, col);
+            add_bar(x + h, y, x, y - h, 0.03f, col);
+            add_bar(x, y - h, x - h, y, 0.03f, col);
+            add_bar(x - h, y, x, y + h, 0.03f, col);
+        };
+        if (r_.rwr_emitter) {
+            const float rr = r_.rwr_level >= 2 ? 0.55f : 0.72f;
+            const auto [x, y] = pol(rr, static_cast<float>(r_.rwr_emitter_deg));
+            text_at(r_.rwr_symbol, x, y, 0.26f, ink);
+            if (r_.rwr_level >= 2 && (r_.rwr_level < 3 || r_.blink)) diamond(x, y, 0.20f, ink);
+        }
+        if (r_.rwr_missile) {
+            const auto [x, y] = pol(0.30f, static_cast<float>(r_.rwr_missile_deg));
+            text_at("M", x, y, 0.24f, red);
+            if (r_.blink) diamond(x, y, 0.17f, red);
+        }
     }
 
     void draw_gear_lamp() {

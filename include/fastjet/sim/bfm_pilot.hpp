@@ -82,6 +82,14 @@ public:
 
     PilotSkill skill{PilotSkill::of(AiSkill::VETERAN)};
     double hard_deck_agl_m{1000.0};
+    /// Fastest the pilot will chase a runner. Guns fights gain nothing past the
+    /// transonic region. A pilot hunting a runner with missiles will go supersonic,
+    /// but never past MAX_CHASE_Q_PA, the high-q corner where the jet's FLCS is at its worst.
+    double max_chase_mach{0.97};
+    /// Dynamic pressure the pilot accepts while still far out (beyond
+    /// MANOEUVRE_RANGE_M), where he is only making small pursuit corrections.
+    /// Closer in he slows below MAX_CHASE_Q_PA before he has to manoeuvre.
+    double far_chase_q_pa{MAX_CHASE_Q_PA};
 
     // Diagnostics
     Situation situation{Situation::NEUTRAL};
@@ -157,11 +165,16 @@ public:
                 if (solution_timer_ <= 0.0 || !solution_.valid) {
                     solution_timer_ = 0.05;
                     solution_ = GunSolution::compute(self.state, self.gun.spec, seen.pos, seen.vel, seen.acc);
+                    // Between refreshes, hold the lead point as an offset from the
+                    // bandit. Held in body axes it would turn with the nose, and the
+                    // error the tracking loop sees would freeze while the jet moves.
+                    lead_offset_ = self.state.q_att.rotate_body_to_ned(solution_.lead_dir_b) * geo.range -
+                                   (seen.pos - self.state.pos_ned);
                 }
                 sol = solution_;
                 if (geo.range < 1400.0 && sol.valid) {
                     maneuver = Maneuver::LEAD_PURSUIT;
-                    aim = self.state.pos_ned + self.state.q_att.rotate_body_to_ned(sol.lead_dir_b) * geo.range;
+                    aim = seen.pos + lead_offset_;
                 } else if (geo.range < 2500.0 && geo.closure > 80.0) {
                     // Too fast inside: lag to hold turn circle position without overshooting.
                     maneuver = Maneuver::LAG_PURSUIT;
@@ -274,6 +287,9 @@ public:
         // Well above it every G buys less turn and the fight runs away
         // downhill; well below it the jet cannot hold the G it needs.
         double throttle = 1.0;
+        const double rho = environment::Atmosphere1976::compute(self.state.altitude()).density;
+        const double q_cap = geo.range > MANOEUVRE_RANGE_M ? std::max(far_chase_q_pa, MAX_CHASE_Q_PA) : MAX_CHASE_Q_PA;
+        const double v_cap = std::min(max_chase_mach * a_sound, std::sqrt(2.0 * q_cap / rho));
         if (skill.uses_energy) {
             double v_target = corner * (situation == Situation::DEFENSIVE ? 1.0 : 1.08);
             if (situation == Situation::OFFENSIVE) {
@@ -281,15 +297,15 @@ public:
                 // enough closure to reach gun range, but not past the transonic
                 // region, where a guns fight has nothing left to gain.
                 const double chase = seen.vel.norm() + std::clamp((geo.range - 500.0) * 0.06, 0.0, 90.0);
-                v_target = std::max(v_target, std::min(chase, 0.97 * a_sound));
+                v_target = std::max(v_target, std::min(chase, v_cap));
             }
             throttle = std::clamp(1.0 - (V - v_target) / 50.0, 0.05, 1.0);
             speedbrake = speedbrake || V > 1.35 * v_target;
         }
         // Everyone, novice or not, comes off the power rather than ram the bandit.
         if (V > 0.9 * corner || geo.range < 600.0) throttle = std::min(throttle, closure_throttle);
-        if (V > 0.95 * a_sound) throttle = std::min(throttle, 0.8); // out of reheat
-        if (V > 1.05 * a_sound) speedbrake = true;
+        if (V > v_cap - 0.02 * a_sound) throttle = std::min(throttle, 0.8); // out of reheat
+        if (V > v_cap + 0.08 * a_sound) speedbrake = true;
 
         // Hard deck: blend the aim point up and away from the ground, starting
         // with enough height left to pull out of the current dive. A pull-out
@@ -358,6 +374,8 @@ private:
     static constexpr double CPA_MIN_MISS_M = 200.0;
     static constexpr double MAX_SHOT_ASPECT = 120.0 * M_PI / 180.0; ///< No forward-quarter snapshots
     static constexpr double G_OFFSET_RATE = 12.0; ///< [G/s]
+    static constexpr double MAX_CHASE_Q_PA = 75000.0; ///< ~350 m/s at sea level, ~450 m/s at 5 km
+    static constexpr double MANOEUVRE_RANGE_M = 6000.0;
     static constexpr int kTrackLen = 48;
     static constexpr double kTrackPeriod = 0.02; // 50 Hz
 
@@ -374,6 +392,7 @@ private:
     double noise_y_{0.0};
     double noise_z_{0.0};
     GunSolution solution_{};
+    math::Vector3 lead_offset_{};
     double solution_timer_{0.0};
     bool g_easing_{false};
     double roll_stick_{0.0};

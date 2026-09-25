@@ -34,6 +34,7 @@ struct AircraftControls {
     double brake_left{0.0};        ///< Toe brakes [0, 1]
     double brake_right{0.0};
     bool trigger{false};           ///< Gun trigger held
+    bool dispense{false};          ///< Countermeasure dispense switch (one program per press)
 };
 
 /**

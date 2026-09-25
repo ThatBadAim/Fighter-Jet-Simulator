@@ -6,6 +6,8 @@
 #include "fastjet/sim/combat_specs.hpp"
 #include "fastjet/sim/damage_model.hpp"
 #include "fastjet/sim/gun.hpp"
+#include "fastjet/sim/missile.hpp"
+#include "fastjet/sim/radar.hpp"
 #include <array>
 #include <cmath>
 #include <cstdint>
@@ -14,32 +16,50 @@ namespace fastjet::sim {
 
 /// @brief Something that happened in the fight, for scoring, HUD cues and the debrief.
 struct CombatEvent {
-    enum class Kind : uint8_t { HIT, KILL, GROUND_IMPACT, MIDAIR };
+    enum class Kind : uint8_t {
+        HIT, KILL, GROUND_IMPACT, MIDAIR,
+        MISSILE_LAUNCH,     ///< shooter fired at victim
+        MISSILE_DETONATION, ///< proximity fuze fired near victim
+        MISSILE_DEFEATED,   ///< ran out of energy, time or track without fuzing
+        LOCK_BROKEN_CHAFF,  ///< a chaff bundle stole a radar or seeker track on victim
+    };
     Kind kind{Kind::HIT};
     int victim{-1};
     int shooter{-1};   ///< Credited aircraft (-1 if none)
     HitZone zone{HitZone::FUSELAGE};
     double time{0.0};
+    double miss_m{0.0};  ///< Missile events: closest approach to the victim
 };
 
 /**
  * @brief Every jet, round and event in one sky, stepped deterministically.
  *
  * Fixed capacity and no heap use in step(). Order within a step is fixed:
- * aircraft (by index) -> guns -> rounds and hit tests -> mid-airs -> ground
- * impacts, and all randomness (dispersion, damage rolls) comes from one
- * seeded generator, so an engagement replays exactly from its inputs.
+ * aircraft (by index) -> guns -> rounds and hit tests -> countermeasures ->
+ * radars -> missiles and fuzes -> mid-airs -> ground impacts, and all
+ * randomness (dispersion, damage, chaff) comes from one seeded generator,
+ * so an engagement replays exactly from its inputs.
  */
 class World {
 public:
     static constexpr int kMaxAircraft = 8;
     static constexpr int kMaxRounds = 4096;
     static constexpr int kMaxEvents = 256;
+    static constexpr int kMaxMissiles = 16;
+    static constexpr int kMaxChaff = 128;
+    static constexpr int CHAFF_PER_PROGRAM = 2;
+    static constexpr double CHAFF_INTERVAL_S = 0.15;
     /// A jet that hits the ground this long after being shot is credited to the shooter.
     static constexpr double KILL_CREDIT_WINDOW_S = 30.0;
 
     std::array<Aircraft, kMaxAircraft> aircraft{};
     std::array<Projectile, kMaxRounds> rounds{};
+    std::array<Missile, kMaxMissiles> missiles{};
+    std::array<ChaffCloud, kMaxChaff> chaff{};
+    std::array<FireControlRadar, kMaxAircraft> radars{};
+    std::array<int, kMaxAircraft> missile_load{}; ///< Missiles left on the rails
+    std::array<MissileSpec, kMaxAircraft> missile_spec{};
+    std::array<int, kMaxAircraft> chaff_load{};   ///< Chaff cartridges left
     int count{0};
     double time{0.0};
     bool dispersion{true};
@@ -50,7 +70,15 @@ public:
         count = 0;
         time = 0.0;
         for (auto& r : rounds) r.active = false;
+        for (auto& m : missiles) m.active = false;
+        for (auto& c : chaff) c.active = false;
         next_round_ = 0;
+        next_chaff_ = 0;
+        missile_load.fill(0);
+        chaff_load.fill(0);
+        program_left_.fill(0);
+        program_timer_.fill(0.0);
+        prev_dispense_.fill(false);
         event_count_ = 0;
         rng_.state = seed ? seed : 1u;
         last_hit_by_.fill(-1);
@@ -71,6 +99,9 @@ public:
         a.seed_turbulence(i == 0 ? 0u : 0x2545F491u * static_cast<uint32_t>(i + 1));
         was_crashed_[static_cast<size_t>(i)] = false;
         was_alive_[static_cast<size_t>(i)] = true;
+        radars[static_cast<size_t>(i)].configure(type);
+        missile_load[static_cast<size_t>(i)] = 0;
+        chaff_load[static_cast<size_t>(i)] = DEFAULT_CHAFF;
         return i;
     }
 
@@ -82,6 +113,7 @@ public:
         time += dt;
         fire_guns(dt, controls);
         step_rounds(dt);
+        step_electronic_combat(dt, controls);
         check_midairs();
         check_ground_impacts();
         check_mission_kills();
@@ -100,6 +132,87 @@ public:
         int n = 0;
         for (const auto& r : rounds) n += r.active ? 1 : 0;
         return n;
+    }
+
+    // ---------------------------------------------------------------------
+    // Missiles, countermeasures and sensors
+    // ---------------------------------------------------------------------
+
+    static constexpr int DEFAULT_CHAFF = 60;
+
+    /// @brief Fire a missile from @p shooter at @p target. It needs a missile on
+    /// the rails and a radar lock on the target to initialise its guidance.
+    /// Returns the missile's slot, or -1.
+    int launch_missile(int shooter, int target) noexcept {
+        if (shooter < 0 || shooter >= count || target < 0 || target >= count || shooter == target) return -1;
+        const auto si = static_cast<size_t>(shooter);
+        const Aircraft& a = aircraft[si];
+        const FireControlRadar& radar = radars[si];
+        if (missile_load[si] <= 0 || !a.alive() || !radar.locked() || radar.target != target) return -1;
+        int slot = -1;
+        for (int k = 0; k < kMaxMissiles; ++k) {
+            if (!missiles[static_cast<size_t>(k)].active) { slot = k; break; }
+        }
+        if (slot < 0) return -1;
+        --missile_load[si];
+        Missile& m = missiles[static_cast<size_t>(slot)];
+        m = Missile{};
+        m.spec = missile_spec[si];
+        m.shooter = shooter;
+        m.target = target;
+        m.active = true;
+        // Off the rail or ejector below the fuselage, at the launcher's velocity.
+        m.body.pos = a.position() + a.state.q_att.rotate_body_to_ned(math::Vector3(0.0, 0.0, 1.2));
+        m.body.vel = a.velocity();
+        m.est_pos = radar.track_pos;
+        m.est_vel = radar.track_vel;
+        m.phase = radar.track_fresh() ? Missile::Phase::DATALINK : Missile::Phase::INERTIAL;
+        push({CombatEvent::Kind::MISSILE_LAUNCH, target, shooter, HitZone::FUSELAGE, time, 0.0});
+        return slot;
+    }
+
+    [[nodiscard]] int missiles_in_flight(int shooter = -1, int target = -1) const noexcept {
+        int n = 0;
+        for (const auto& m : missiles) {
+            if (!m.active) continue;
+            if (shooter >= 0 && m.shooter != shooter) continue;
+            if (target >= 0 && m.target != target) continue;
+            ++n;
+        }
+        return n;
+    }
+
+    /// @brief What @p i's radar warning receiver shows.
+    [[nodiscard]] RwrStatus rwr(int i) const noexcept {
+        RwrStatus s;
+        if (i < 0 || i >= count) return s;
+        const Aircraft& own = aircraft[static_cast<size_t>(i)];
+        auto raise = [&s](RwrStatus::Level l) { if (static_cast<int>(l) > static_cast<int>(s.level)) s.level = l; };
+        for (int j = 0; j < count; ++j) {
+            if (j == i) continue;
+            const FireControlRadar& r = radars[static_cast<size_t>(j)];
+            const Aircraft& e = aircraft[static_cast<size_t>(j)];
+            if (r.mode == FireControlRadar::Mode::OFF || r.target != i || !e.alive()) continue;
+            if (!r.locked() && !r.painting()) continue;
+            raise(r.locked() ? RwrStatus::Level::LOCK : RwrStatus::Level::SEARCH);
+            s.emitter_valid = true;
+            s.emitter_bearing = RwrStatus::relative_bearing(own.state, e.position());
+            s.emitter_symbol = r.spec.rwr_symbol;
+        }
+        double nearest = 1e18;
+        for (const auto& m : missiles) {
+            if (!m.active || m.target != i || !missile_warning(m)) continue;
+            raise(RwrStatus::Level::LAUNCH);
+            const double d = (m.body.pos - own.position()).norm();
+            if (d < nearest) {
+                nearest = d;
+                s.missile_valid = true;
+                s.missile_bearing = RwrStatus::relative_bearing(own.state, m.body.pos);
+                s.missile_range_m = d;
+                s.missile_seeker_active = m.seeker_active();
+            }
+        }
+        return s;
     }
 
     // ---------------------------------------------------------------------
@@ -152,6 +265,180 @@ private:
     std::array<double, kMaxAircraft> last_hit_time_{};
     std::array<bool, kMaxAircraft> was_crashed_{};
     std::array<bool, kMaxAircraft> was_alive_{};
+    int next_chaff_{0};
+    std::array<int, kMaxAircraft> program_left_{};
+    std::array<double, kMaxAircraft> program_timer_{};
+    std::array<bool, kMaxAircraft> prev_dispense_{};
+
+    /// @brief Can the target's RWR hear this missile? The launcher's uplink
+    /// while it holds lock, or the missile's own seeker once it is pointed at
+    /// the jet. An inertial missile, or one searching somewhere else, is silent.
+    [[nodiscard]] bool missile_warning(const Missile& m) const noexcept {
+        switch (m.phase) {
+            case Missile::Phase::DATALINK:
+                return m.shooter >= 0 && radars[static_cast<size_t>(m.shooter)].track_fresh();
+            case Missile::Phase::ACTIVE_TRACK: return true;
+            case Missile::Phase::ACTIVE_SEARCH: {
+                if (m.decoy_timer > 0.0) return false;
+                const Aircraft& t = aircraft[static_cast<size_t>(m.target)];
+                return AirCombatGeometry::angle_between(m.est_pos - m.body.pos, t.position() - m.body.pos) <
+                       2.0 * m.spec.seeker_basket_deg * M_PI / 180.0;
+            }
+            default: return false;
+        }
+    }
+
+    /// @brief Countermeasures, radars and missiles. Kept out of line so that
+    /// step() compiles the aircraft pipeline exactly as the single-jet
+    /// reference loop does (same inlining, same FMA contraction), which
+    /// test_aircraft_entity checks bit for bit.
+    [[gnu::noinline]] void step_electronic_combat(double dt,
+                                                  const std::array<AircraftControls, kMaxAircraft>& controls) noexcept {
+        dispense_countermeasures(dt, controls);
+        step_radars(dt);
+        step_missiles(dt);
+        step_chaff(dt);
+    }
+
+    void dispense_countermeasures(double dt, const std::array<AircraftControls, kMaxAircraft>& controls) noexcept {
+        for (int i = 0; i < count; ++i) {
+            const auto idx = static_cast<size_t>(i);
+            const Aircraft& a = aircraft[idx];
+            const bool pressed = controls[idx].dispense && !prev_dispense_[idx];
+            prev_dispense_[idx] = controls[idx].dispense;
+            if (pressed && a.alive()) program_left_[idx] += CHAFF_PER_PROGRAM;
+            if (program_left_[idx] <= 0) continue;
+            program_timer_[idx] -= dt;
+            if (program_timer_[idx] > 0.0) continue;
+            if (chaff_load[idx] <= 0 || a.crashed) {
+                program_left_[idx] = 0;
+                continue;
+            }
+            --program_left_[idx];
+            --chaff_load[idx];
+            program_timer_[idx] = CHAFF_INTERVAL_S;
+            ChaffCloud& c = chaff[static_cast<size_t>(next_chaff_)];
+            next_chaff_ = (next_chaff_ + 1) % kMaxChaff;
+            c = ChaffCloud{};
+            // Ejected down from the aft fuselage dispensers into the airflow.
+            c.pos = a.position() + a.state.q_att.rotate_body_to_ned(math::Vector3(-5.0, 0.0, 0.8));
+            c.vel = a.velocity() + a.state.q_att.rotate_body_to_ned(math::Vector3(0.0, 0.0, 15.0));
+            c.owner = i;
+            c.active = true;
+        }
+    }
+
+    void step_radars(double dt) noexcept {
+        for (int i = 0; i < count; ++i) {
+            FireControlRadar& r = radars[static_cast<size_t>(i)];
+            if (r.mode == FireControlRadar::Mode::OFF || r.target < 0 || r.target >= count) continue;
+            r.update(dt, aircraft[static_cast<size_t>(i)], aircraft[static_cast<size_t>(r.target)]);
+        }
+    }
+
+    /// @brief A bundle blooming in a tracker's gates can steal its track. Each
+    /// bundle gets one roll per tracker when it blooms.
+    void step_chaff(double dt) noexcept {
+        for (auto& c : chaff) {
+            if (!c.active) continue;
+            c.step(dt);
+            if (c.bloomed || c.age < ChaffCloud::BLOOM_S || c.owner < 0) continue;
+            c.bloomed = true;
+            const Aircraft& victim = aircraft[static_cast<size_t>(c.owner)];
+            for (int j = 0; j < count; ++j) {
+                FireControlRadar& r = radars[static_cast<size_t>(j)];
+                if (j == c.owner || !r.locked() || r.target != c.owner) continue;
+                const Aircraft& a = aircraft[static_cast<size_t>(j)];
+                if (!chaff_in_gates(a.position(), victim.position(), victim.velocity(), c, r.limits().beam_half_rad)) {
+                    continue;
+                }
+                if (rng_.uniform() < r.spec.chaff_seduction) {
+                    r.break_lock(1.0);
+                    push({CombatEvent::Kind::LOCK_BROKEN_CHAFF, c.owner, j, HitZone::FUSELAGE, time, 0.0});
+                }
+            }
+            for (auto& m : missiles) {
+                if (!m.active || m.target != c.owner || m.phase != Missile::Phase::ACTIVE_TRACK) continue;
+                if (!chaff_in_gates(m.body.pos, victim.position(), victim.velocity(), c,
+                                    m.seeker_limits().beam_half_rad)) {
+                    continue;
+                }
+                if (rng_.uniform() < m.spec.chaff_seduction) {
+                    m.seduce(c);
+                    push({CombatEvent::Kind::LOCK_BROKEN_CHAFF, c.owner, m.shooter, HitZone::FUSELAGE, time, 0.0});
+                }
+            }
+        }
+    }
+
+    void step_missiles(double dt) noexcept {
+        for (auto& m : missiles) {
+            if (!m.active) continue;
+            const Aircraft& tgt = aircraft[static_cast<size_t>(m.target)];
+            const auto& radar = radars[static_cast<size_t>(m.shooter)];
+            const bool uplink = aircraft[static_cast<size_t>(m.shooter)].alive() && radar.target == m.target &&
+                                radar.track_fresh();
+            const math::Vector3 p0 = m.body.pos;
+            m.update(dt, uplink, tgt.position(), tgt.velocity());
+
+            // Proximity fuze: closest approach this step, swept against every jet but the shooter.
+            if (m.body.tof > m.spec.arm_time_s) {
+                for (int j = 0; j < count; ++j) {
+                    if (j == m.shooter) continue;
+                    Aircraft& t = aircraft[static_cast<size_t>(j)];
+                    if (t.crashed) continue;
+                    double s = 0.0;
+                    const double d = closest_approach(p0, m.body.pos, t.prev_state.pos_ned, t.state.pos_ned, s);
+                    if (d < m.spec.fuze_radius_m && s < 1.0) {
+                        const math::Vector3 burst = p0 + (m.body.pos - p0) * s;
+                        detonate(m, j, burst, d);
+                        break;
+                    }
+                }
+            }
+            if (m.active && m.expired()) {
+                m.active = false;
+                push({CombatEvent::Kind::MISSILE_DEFEATED, m.target, m.shooter, HitZone::FUSELAGE, time, 0.0});
+            }
+        }
+    }
+
+    /// @brief Blast-fragmentation warhead. A burst within a few metres destroys
+    /// the jet. Further out, fragments strike components in proportion to the
+    /// solid angle the jet fills, weighted to the side facing the burst.
+    void detonate(Missile& m, int victim, const math::Vector3& burst, double miss) noexcept {
+        m.active = false;
+        Aircraft& t = aircraft[static_cast<size_t>(victim)];
+        constexpr double DIRECT_HIT_M = 3.0;
+        constexpr double MAX_FRAGMENT_HITS = 18.0;
+        HitZone first = HitZone::FUSELAGE;
+        const int hits_before = t.damage.hits_taken;
+        if (miss <= DIRECT_HIT_M) {
+            ++t.damage.hits_taken;
+            t.damage.destroyed = true;
+        } else {
+            const double f = std::clamp(1.0 - miss / m.spec.lethal_radius_m, 0.0, 1.0);
+            const int hits = static_cast<int>(std::lround(MAX_FRAGMENT_HITS * f * f));
+            const math::Vector3 side_b = t.state.q_att.rotate_ned_to_body(burst - t.position());
+            const bool left = side_b.y < 0.0;
+            for (int k = 0; k < hits && !t.damage.destroyed; ++k) {
+                const double u = rng_.uniform();
+                HitZone z = HitZone::FUSELAGE;
+                if (u < 0.08) z = HitZone::COCKPIT;
+                else if (u < 0.36) z = HitZone::FUSELAGE;
+                else if (u < 0.60) z = HitZone::ENGINE;
+                else if (u < 0.82) z = left ? HitZone::WING_LEFT : HitZone::WING_RIGHT;
+                else if (u < 0.90) z = left ? HitZone::WING_RIGHT : HitZone::WING_LEFT;
+                else z = HitZone::TAIL;
+                if (k == 0) first = z;
+                t.damage.apply_hit(z, 1.0, rng_);
+            }
+        }
+        last_hit_by_[static_cast<size_t>(victim)] = m.shooter;
+        last_hit_time_[static_cast<size_t>(victim)] = time;
+        push({CombatEvent::Kind::MISSILE_DETONATION, victim, m.shooter, first, time, miss});
+        if (t.damage.hits_taken > hits_before) push({CombatEvent::Kind::HIT, victim, m.shooter, first, time, miss});
+    }
 
     void push(CombatEvent e) noexcept {
         if (event_count_ < kMaxEvents) events_[static_cast<size_t>(event_count_++)] = e;
@@ -213,7 +500,7 @@ private:
                 t.damage.apply_hit(zone, p.lethality, rng_);
                 last_hit_by_[static_cast<size_t>(j)] = p.owner;
                 last_hit_time_[static_cast<size_t>(j)] = time;
-                push({CombatEvent::Kind::HIT, j, p.owner, zone, time});
+                push({CombatEvent::Kind::HIT, j, p.owner, zone, time, 0.0});
                 p.active = false;
                 break;
             }
@@ -242,8 +529,8 @@ private:
                 if (d < contact) {
                     a.damage.destroyed = true;
                     b.damage.destroyed = true;
-                    push({CombatEvent::Kind::MIDAIR, i, j, HitZone::FUSELAGE, time});
-                    push({CombatEvent::Kind::MIDAIR, j, i, HitZone::FUSELAGE, time});
+                    push({CombatEvent::Kind::MIDAIR, i, j, HitZone::FUSELAGE, time, 0.0});
+                    push({CombatEvent::Kind::MIDAIR, j, i, HitZone::FUSELAGE, time, 0.0});
                     was_alive_[static_cast<size_t>(i)] = false;
                     was_alive_[static_cast<size_t>(j)] = false;
                 }
@@ -262,10 +549,10 @@ private:
             const Aircraft& a = aircraft[idx];
             if (a.crashed && !was_crashed_[idx]) {
                 was_crashed_[idx] = true;
-                push({CombatEvent::Kind::GROUND_IMPACT, i, credited_shooter(i), HitZone::FUSELAGE, time});
+                push({CombatEvent::Kind::GROUND_IMPACT, i, credited_shooter(i), HitZone::FUSELAGE, time, 0.0});
                 if (was_alive_[idx]) {
                     was_alive_[idx] = false;
-                    push({CombatEvent::Kind::KILL, i, credited_shooter(i), HitZone::FUSELAGE, time});
+                    push({CombatEvent::Kind::KILL, i, credited_shooter(i), HitZone::FUSELAGE, time, 0.0});
                 }
             }
         }
@@ -279,7 +566,7 @@ private:
             if (was_alive_[idx] && !aircraft[idx].alive()) {
                 was_alive_[idx] = false;
                 if (!aircraft[idx].crashed) {
-                    push({CombatEvent::Kind::KILL, i, credited_shooter(i), HitZone::FUSELAGE, time});
+                    push({CombatEvent::Kind::KILL, i, credited_shooter(i), HitZone::FUSELAGE, time, 0.0});
                 }
             }
         }

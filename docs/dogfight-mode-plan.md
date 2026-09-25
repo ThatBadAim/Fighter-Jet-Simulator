@@ -101,6 +101,54 @@ Across 240 AI-vs-AI fights there were zero unforced terrain impacts and zero mid
 5. Then Phases 5–8 as originally planned (IR missiles and flares, sensors, multi-bandit,
    debrief replay from the deterministic event log, distinct airframe models).
 
+### Evade mode (2026-09-25)
+
+A defensive mode built on the same world: a bandit with radar missiles and a gun starts in your
+six and hunts you. It pulls part of Phase 5 (missiles, countermeasures) and Phase 6 (radar, RWR)
+forward, radar-guided instead of IR, because the RWR lock and launch warnings are what the mode is about.
+Menu **EVADE** or `--evade [easy|medium|hard|expert]`. **C** dispenses chaff and **F11** cycles
+the difficulty. **F10** now cycles merge → offensive → defensive → range → evade.
+
+| Piece | File | Tests |
+|---|---|---|
+| AIM-120C-class missile: motor, Mach drag, induced drag, G and lift limits, autopilot lag, PN, datalink → inertial → active seeker, proximity fuze, blast-frag damage | `sim/missile.hpp` | `test_missiles`: Mach 3.2 burnout, lift-limited turn when slow, PN miss < 2 m, flyout = live missile bit for bit, head-on > beam > tail zones |
+| Fire-control radar (search, lock, memory, gimbal, notch, chaff) and RWR | `sim/radar.hpp`, `sim/world.hpp` | notch needs beaming *and* look-down; chaff only inside the doppler gate; lock → launch heard on the RWR |
+| Launch doctrine from flyouts (Rmax, no-escape, shoot-shoot) | `sim/missile_shooter.hpp` | via `test_evade_mode` |
+| Difficulty profiles, rules (bingo, Winchester, escape), stats | `sim/engagement.hpp` | `test_evade_mode` |
+| Missile-defence AI (beam, notch the launcher, chaff, last-ditch break) for `--watch` and tests | `sim/evasion_pilot.hpp` | survives MEDIUM ≥ 4/8 and ≥ EXPERT + 3 |
+| RWR tones (new-emitter chirps, lock beep, launch warble), panel RWR scope, HUD `LOCK 6`/`LAUNCH 6`, chaff count, debrief | `audio/audio_engine.hpp`, `graphics/cockpit_gauges.hpp`, `hud_collimator.hpp` | `test_render_fidelity` (gauge placement) |
+
+Outcomes over 24 seeds per case (the "competent defence" is `EvasionPilot`):
+
+| Level | Straight and level | Run in reheat | Competent defence survives |
+|---|---|---|---|
+| EASY (novice, gun) | killed 24/24 | survives 24/24 | 24/24 |
+| MEDIUM (veteran, 2 missiles, Rmax shots, 10 nm) | killed 24/24 | survives 24/24 | 15/24 |
+| HARD (ace, 4, no-escape shots, 6.5 nm) | killed 24/24 | killed 24/24 | 6/24 |
+| EXPERT (ace, 4, shoot-shoot, 6 nm) | killed 24/24 | killed 24/24 | 2/24 |
+
+Zero unforced ground impacts or mid-airs in all 480 fights.
+
+Findings on the way:
+
+- **BFM gun tracking fixed at high speed.** Between 20 Hz gun-solution refreshes, the AI held the lead
+  direction in body axes, so it turned with the nose and the tracking loop saw a frozen error.
+  Above ~300 m/s every skill level bobbed ±1 G behind a straight target and never fired. The
+  lead is now held as an offset from the bandit. In `test_bfm_ai`, AI-vs-AI fights decided before
+  the time limit went from 6/24 to 12/24, and ace-over-novice perch conversions from 3/12 to 8/12.
+- **Chase speed cap by dynamic pressure.** The BFM pilot's transonic chase cap is now also limited
+  to q ≤ 75 kPa (the FLCS problem corner). In evade the bandit may chase at up to 95 kPa while more
+  than 6 km out, which lets identical jets match speeds. Dogfight behaviour is unchanged.
+- **A supersonic run is a real escape.** An AMRAAM launched from Mach 1.5 cannot run down a Mach 1.5
+  target from more than ~11 km in the tail. HARD therefore starts inside the no-escape zone.
+- `World::step` keeps the new subsystems in one out-of-line call. Inlining them changed FMA
+  contraction in the aircraft step and broke `test_aircraft_entity`'s bit-exact check under
+  `-march=native`.
+
+Next for evade: IR missiles (AIM-9X) with flares and a missile approach warner on the jets that
+have one, an F-22 LPI radar that the RWR hears late, and a realism toggle for the HUD
+`LOCK`/`LAUNCH` cue (an assist: the real F-16 shows threats only on the RWR scope).
+
 ---
 
 ## 1. Design pillars

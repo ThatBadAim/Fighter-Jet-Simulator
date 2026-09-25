@@ -34,6 +34,61 @@ struct CombatTelemetry {
     char status[64] = "";             ///< Fight description (skill, set-up)
     char banner[40] = "";             ///< Outcome, empty while the fight is on
     char debrief[96] = "";            ///< One-line score under the banner
+    char debrief2[96] = "";           ///< Second debrief line (evade: missiles and chaff)
+
+    // Radar warning receiver and countermeasures. Bearings are relative
+    // azimuths: 0 on the nose, positive clockwise, degrees.
+    bool rwr_active = false;          ///< Draw the RWR azimuth display
+    int rwr_level = 0;                ///< 0 clear, 1 search (painted), 2 lock, 3 missile launch
+    bool rwr_emitter_valid = false;
+    double rwr_emitter_bearing_deg = 0.0;
+    char rwr_symbol[4] = "";          ///< Emitter type, e.g. "16"
+    bool rwr_missile_valid = false;
+    double rwr_missile_bearing_deg = 0.0;
+    double rwr_missile_range_m = 0.0;
+    int chaff = -1;                   ///< Cartridges left (-1: no dispenser shown)
+    bool blink = false;               ///< Warning flash phase (~3 Hz)
+};
+
+/// @brief The fire-control radar (FCR) page: a B-scope of azimuth against range.
+/// Azimuths are from the ownship's heading in the stabilised scan frame,
+/// positive right, degrees.
+struct RadarTelemetry {
+    static constexpr int kMaxHits = 32;
+    struct Hit {
+        float az_deg = 0.0f;
+        float range_nm = 0.0f;
+        int age = 0;                  ///< Scan frames since the paint (0: this frame)
+    };
+
+    bool page_fcr = false;            ///< Left MFD shows FCR (else the FLCS page)
+    bool fitted = false;              ///< The airframe carries an air-to-air radar
+    int mode = 0;                     ///< 0 off, 1 RWS, 2 STT
+    double range_scale_nm = 20.0;
+    double az_limit_deg = 60.0;
+    int bars = 4;
+    double ant_az_deg = 0.0;          ///< Antenna position (the carets)
+    double ant_el_deg = 0.0;
+    double pitch_deg = 0.0;           ///< Ownship attitude for the artificial horizon
+    double roll_deg = 0.0;
+    int hit_count = 0;
+    Hit hits[kMaxHits]{};
+    double cursor_az_deg = 0.0;       ///< Acquisition cursor
+    double cursor_range_nm = 10.0;
+    int cov_top_kft = 0;              ///< Altitude block the scan covers at the cursor's range
+    int cov_bottom_kft = 0;
+    // STT
+    bool track_memory = false;        ///< Coasting on an extrapolated track
+    double tgt_az_deg = 0.0;
+    double tgt_range_nm = 0.0;
+    double tgt_alt_kft = 0.0;
+    double tgt_rel_heading_deg = 0.0; ///< Target track relative to the ownship's heading
+    double tgt_heading_deg = 0.0;     ///< True track, 0-360
+    double tgt_gs_kt = 0.0;
+    double closure_kt = 0.0;
+    int aspect_tens = 0;              ///< Target aspect in tens of degrees (18: head-on)
+    char aspect_side = 'R';           ///< Which side of the target the ownship is on
+    bool blink = false;               ///< ~3 Hz flash phase
 };
 
 /// @brief Comprehensive real-time cockpit avionics and propulsion telemetry
@@ -97,6 +152,7 @@ struct AvionicsTelemetry {
     double ofc_g_exposure         = 0.0;     ///< G-exposure accumulator value (debug / HUD readout)
 
     CombatTelemetry combat{};
+    RadarTelemetry radar{};
 };
 
 } // namespace fastjet::graphics

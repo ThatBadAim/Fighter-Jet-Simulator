@@ -68,7 +68,8 @@ inline constexpr std::array<std::string_view, static_cast<size_t>(ColorblindMode
 /// style layouts in place on AZERTY/QWERTZ keyboards.
 namespace scancode {
 inline constexpr int32_t NONE = 0;
-inline constexpr int32_t A = 4, B = 5, D = 7, F = 9, G = 10, H = 11, I = 12, J = 13, M = 16, R = 21, T = 23, V = 25;
+inline constexpr int32_t A = 4, B = 5, C = 6, D = 7, F = 9, G = 10, H = 11, I = 12, J = 13, L = 15, M = 16, P = 19, R = 21, T = 23, V = 25;
+inline constexpr int32_t MINUS = 45, EQUALS = 46, LEFTBRACKET = 47, RIGHTBRACKET = 48;
 inline constexpr int32_t NUM_1 = 30, NUM_5 = 34;
 inline constexpr int32_t RETURN = 40, ESCAPE = 41, BACKSPACE = 42, TAB = 43, SPACE = 44;
 inline constexpr int32_t F1 = 58, F8 = 65;
@@ -96,6 +97,13 @@ enum class InputAction : uint8_t {
     TRIM_RESET,
     RESET_FLIGHT,
     FIRE_GUN,
+    DISPENSE_CHAFF,
+    RADAR_LOCK,
+    RADAR_RANGE_UP,
+    RADAR_RANGE_DOWN,
+    ANTENNA_UP,
+    ANTENNA_DOWN,
+    MFD_PAGE,
     COUNT
 };
 inline constexpr size_t kInputActionCount = static_cast<size_t>(InputAction::COUNT);
@@ -136,6 +144,13 @@ inline constexpr std::array<ActionInfo, kInputActionCount> kActionInfo = {{
     {"trim_reset",    {scancode::T, scancode::NONE}},
     {"reset_flight",  {scancode::R, scancode::NONE}},
     {"fire_gun",      {scancode::F, scancode::NONE}},
+    {"dispense_chaff", {scancode::C, scancode::NONE}},
+    {"radar_lock",       {scancode::L, scancode::NONE}},
+    {"radar_range_up",   {scancode::RIGHTBRACKET, scancode::NONE}},
+    {"radar_range_down", {scancode::LEFTBRACKET, scancode::NONE}},
+    {"antenna_up",       {scancode::EQUALS, scancode::NONE}},
+    {"antenna_down",     {scancode::MINUS, scancode::NONE}},
+    {"mfd_page",         {scancode::P, scancode::NONE}},
 }};
 
 /// @brief Keys owned by fixed hotkeys (menu, camera, airframe, detents,

@@ -34,8 +34,13 @@ struct AudioSample {
 /// - Landing gear hydraulic transit clunk (gear_transit.wav)
 /// - Cockpit aural warning tones / Betty (over_g.wav, stall.wav, pull_up.wav)
 ///
-/// NOTE: If sound files are not installed in assets/sounds/, the engine remains
-/// completely silent with zero CPU overhead (no harsh procedural buzz or chiptune beeps).
+/// Radar warning receiver tones are synthesised, because in the jet they are
+/// synthesised too: the RWR drives the headset with electronic tones, not
+/// recordings. New emitter: three short chirps. Lock: a steady pulsed beep.
+/// Missile launch: a fast two-tone warble that holds while the missile is guided.
+///
+/// NOTE: If sound files are not installed in assets/sounds/, the recorded
+/// channels stay silent (no procedural substitutes for engine or airflow).
 ///
 /// Threading: mixing runs on SDL's audio thread, in the stream's get
 /// callback, so playback never depends on the frame rate: a long frame
@@ -70,6 +75,15 @@ private:
     // Mix buffer for the audio thread, allocated once at init.
     std::vector<float> mix_buffer_;
     static constexpr int kMixChunkFrames = 1024;
+
+    // RWR tone generator (audio thread reads, main thread sets under the stream lock)
+    enum class RwrTone : uint8_t { NONE, LOCK, LAUNCH };
+    RwrTone rwr_tone_ = RwrTone::NONE;
+    int rwr_chirps_left_ = 0;     // New-emitter chirps still to play
+    double rwr_clock_ = 0.0;      // Seconds into the current pattern
+    double rwr_phase_ = 0.0;      // Oscillator phase [cycles]
+    float rwr_env_ = 0.0f;        // Click-free on/off envelope
+    int prev_rwr_level_ = 0;
 
     // State transition tracking
     bool prev_on_ground_     = false;
@@ -145,10 +159,9 @@ public:
 
         mix_buffer_.assign(static_cast<size_t>(kMixChunkFrames) * CHANNELS, 0.0f);
         initialized_ = true;
-        if (loaded_count > 0) {
-            // Silent builds never start the mixer: zero audio-thread work.
-            SDL_SetAudioStreamGetCallback(stream_, &AudioEngine::feed, this);
-        }
+        // The mixer always runs: the RWR tones need no sample files. With
+        // nothing playing it only writes silence.
+        SDL_SetAudioStreamGetCallback(stream_, &AudioEngine::feed, this);
         SDL_ResumeAudioDevice(device_id_);
         return true;
     }
@@ -186,6 +199,8 @@ public:
                 double airspeed,
                 [[maybe_unused]] double frame_dt) {
         if (!initialized_ || !enabled_) return;
+
+        update_rwr(tel);
 
         // If no authentic samples are installed on disk, run completely silent without queuing buffer
         const bool any_sample_loaded = (sfx_spool_.loaded || sfx_afterburner_.loaded ||
@@ -257,6 +272,69 @@ public:
     }
 
 private:
+    /// @brief Pick the RWR tone from the combat telemetry. The highest threat
+    /// wins; a new emitter (clear -> anything) starts the three-chirp alert.
+    void update_rwr(const graphics::AvionicsTelemetry& tel) noexcept {
+        const int level = (tel.combat.active && tel.combat.rwr_active && !tel.is_crashed) ? tel.combat.rwr_level : 0;
+        StreamLock lock(stream_);
+        const RwrTone want = level >= 3 ? RwrTone::LAUNCH : level == 2 ? RwrTone::LOCK : RwrTone::NONE;
+        if (want != rwr_tone_) {
+            rwr_tone_ = want;
+            rwr_clock_ = 0.0;
+        }
+        if (level > 0 && prev_rwr_level_ == 0) {
+            rwr_chirps_left_ = 3;
+            if (rwr_tone_ == RwrTone::NONE) rwr_clock_ = 0.0;
+        }
+        if (level == 0) rwr_chirps_left_ = 0;
+        prev_rwr_level_ = level;
+    }
+
+    /// @brief Synthesise the RWR tone into @p out (audio thread).
+    void mix_rwr(float* out, int num_samples) noexcept {
+        constexpr double DT = 1.0 / SAMPLE_RATE;
+        constexpr float GAIN = 0.22f;
+        const bool chirping = rwr_tone_ == RwrTone::NONE && rwr_chirps_left_ > 0;
+        if (rwr_tone_ == RwrTone::NONE && !chirping && rwr_env_ <= 0.0f) return;
+        for (int i = 0; i < num_samples; ++i) {
+            double freq = 0.0;
+            bool on = false;
+            switch (rwr_tone_) {
+                case RwrTone::LAUNCH:
+                    // Two-tone warble, 12 alternations a second, continuous.
+                    freq = std::fmod(rwr_clock_ * 12.0, 1.0) < 0.5 ? 1350.0 : 1800.0;
+                    on = true;
+                    break;
+                case RwrTone::LOCK:
+                    // Steady pulsed tone: beep-beep-beep, 5 a second.
+                    freq = 1000.0;
+                    on = std::fmod(rwr_clock_ * 5.0, 1.0) < 0.5;
+                    break;
+                case RwrTone::NONE:
+                    if (rwr_chirps_left_ > 0) {
+                        // New emitter: three 70 ms chirps, 50 ms apart.
+                        const double cycle = std::fmod(rwr_clock_, 0.12);
+                        freq = 1200.0;
+                        on = cycle < 0.07;
+                        if (rwr_clock_ >= 0.12 * 3) rwr_chirps_left_ = 0;
+                    }
+                    break;
+            }
+            // 3 ms attack/release: no clicks at the pulse edges.
+            const float target = on ? 1.0f : 0.0f;
+            rwr_env_ += (target - rwr_env_) * 0.0075f;
+            if (!on && rwr_env_ < 1e-4f) rwr_env_ = 0.0f;
+            if (freq > 0.0) rwr_phase_ = std::fmod(rwr_phase_ + freq * DT, 1.0);
+            const double ph = 2.0 * M_PI * rwr_phase_;
+            // A little third harmonic gives the hard edge of an electronic tone.
+            const float v = static_cast<float>(std::sin(ph) + 0.3 * std::sin(3.0 * ph)) * rwr_env_ * GAIN *
+                            alerts_bus_gain_;
+            out[i * 2 + 0] = std::clamp(out[i * 2 + 0] + v, -1.0f, 1.0f);
+            out[i * 2 + 1] = std::clamp(out[i * 2 + 1] + v, -1.0f, 1.0f);
+            rwr_clock_ += DT;
+        }
+    }
+
     /// Scoped SDL stream lock (no-op without a stream).
     struct StreamLock {
         SDL_AudioStream* s;
@@ -337,6 +415,7 @@ private:
                 }
             }
         }
+        mix_rwr(out, num_samples);
     }
 
     /// @brief Load a .wav file from disk and convert to target 44.1kHz stereo Float32 format

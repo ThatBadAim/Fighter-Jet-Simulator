@@ -112,7 +112,10 @@ if(FASTJET_BUILD_TESTS)
         test_aircraft_entity
         test_guns
         test_air_combat_geometry
-        test_bfm_ai)
+        test_bfm_ai
+        test_missiles
+        test_evade_mode
+        test_radar_scope)
 
     # Tests that need SDL3 and/or an OpenGL context.
     set(FASTJET_GRAPHICS_TESTS

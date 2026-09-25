@@ -27,6 +27,7 @@ enum class MenuAction : uint8_t {
     RESUME_FLIGHT,       ///< In flight: close the pause menu
     OPEN_MISSION_SELECT, ///< Hand over to the tactical aircraft/sortie menu
     START_DOGFIGHT,      ///< Begin a 1v1 guns engagement against an AI bandit
+    START_EVADE,         ///< Begin evade mode: survive a bandit hunting you with missiles and gun
     QUIT,
 };
 

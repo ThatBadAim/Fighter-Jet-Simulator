@@ -736,6 +736,10 @@ public:
             {Gauge::GEAR_LAMP, {{{2.3768f, -0.3296f, -0.2819f}, {2.3775f, -0.3175f, -0.2802f}, {2.3695f, -0.3201f, -0.2729f}, {2.3688f, -0.3321f, -0.2746f}}}},
             {Gauge::GEAR_LAMP, {{{2.3788f, -0.3051f, -0.2791f}, {2.3795f, -0.2931f, -0.2774f}, {2.3715f, -0.2956f, -0.2701f}, {2.3708f, -0.3076f, -0.2717f}}}},
             {Gauge::GEAR_LAMP, {{{2.3898f, -0.3179f, -0.2923f}, {2.3905f, -0.3062f, -0.2907f}, {2.3826f, -0.3062f, -0.2830f}, {2.3819f, -0.3179f, -0.2846f}}}},
+            // Threat warning azimuth scope, upper left. Located by projecting the
+            // painted scope's screen position from the design eye point onto the
+            // plane of the DED's panel, 3 mm proud of it.
+            {Gauge::RWR, {{{2.3727f, -0.1388f, -0.5813f}, {2.3727f, -0.0848f, -0.5813f}, {2.3607f, -0.0848f, -0.5287f}, {2.3607f, -0.1388f, -0.5287f}}}},
         };
         std::vector<ScreenQuad> quads;
         for (const auto& [g, corners] : kPlacements) quads.push_back(CockpitGauges::screen(g, corners));

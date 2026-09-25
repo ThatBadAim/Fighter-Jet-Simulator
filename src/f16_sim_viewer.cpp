@@ -25,6 +25,7 @@
 #include "fastjet/gear/landing_gear.hpp"
 #include "fastjet/environment/ground_collision.hpp"
 #include "fastjet/sim/engagement.hpp"
+#include "fastjet/sim/radar_scope.hpp"
 #include "fastjet/sim/world.hpp"
 
 #define CGLTF_IMPLEMENTATION
@@ -102,12 +103,18 @@ int main(int argc, char* argv[]) {
     std::cout << "  H:                      Toggle Cockpit G-Head Motion (Default: Fixed DEP like MSFS)\n";
     std::cout << "  T / R:                  Trim reset / Reset simulation\n";
     std::cout << "  Esc / Gamepad Start:    Pause menu (settings, credits, quit)\n";
-    std::cout << "  F:                      Fire gun (dogfight)\n";
-    std::cout << "  F9 / F10:               Dogfight: new fight / cycle set-up (merge, perch, range)\n";
-    std::cout << "  F11:                    Dogfight: cycle bandit skill\n";
+    std::cout << "  F:                      Fire gun (dogfight / evade)\n";
+    std::cout << "  C:                      Dispense chaff (2 bundles per press)\n";
+    std::cout << "  L:                      Radar lock / unlock (FCR page, left MFD)\n";
+    std::cout << "  [ / ]:                  Radar range scale down / up\n";
+    std::cout << "  = / -:                  Radar antenna elevation up / down\n";
+    std::cout << "  P:                      Left MFD page: FCR / FLCS\n";
+    std::cout << "  F9 / F10:               New fight / cycle set-up (merge, perch, range, evade)\n";
+    std::cout << "  F11:                    Cycle bandit skill (dogfight) or difficulty (evade)\n";
     std::cout << "  (Flight keys can be rebound in Settings > Controls.)\n";
     std::cout << "  --dogfight [merge|offensive|defensive|range] --skill [novice|veteran|ace] --bandit TYPE\n";
-    std::cout << "  --watch:                Dogfight demo: the AI flies your jet as well\n";
+    std::cout << "  --evade [easy|medium|hard|expert]: survive a bandit with radar missiles in your six\n";
+    std::cout << "  --watch:                Demo: the AI flies your jet as well\n";
     std::cout << "  --profile:              Print frame timing and per-pass GPU cost every 2 s\n";
     std::cout << "---------------------------------------------------------\n";
 
@@ -168,6 +175,18 @@ int main(int argc, char* argv[]) {
                 else if (g == "defensive") dogfight_setup.geometry = sim::StartGeometry::DEFENSIVE_PERCH;
                 else if (g == "range") dogfight_setup.geometry = sim::StartGeometry::GUNNERY_RANGE;
                 else dogfight_setup.geometry = sim::StartGeometry::HEAD_ON_MERGE;
+            }
+        }
+        if (arg == "--evade") {
+            start_dogfight = true;
+            no_menu = true;
+            dogfight_setup.mode = sim::EngagementMode::EVADE;
+            if (i + 1 < argc && argv[i + 1][0] != '-') {
+                const std::string d = argv[++i];
+                dogfight_setup.evade_difficulty = d == "easy"     ? sim::EvadeDifficulty::EASY
+                                                : d == "hard"     ? sim::EvadeDifficulty::HARD
+                                                : d == "expert"   ? sim::EvadeDifficulty::EXPERT
+                                                                  : sim::EvadeDifficulty::MEDIUM;
             }
         }
         if (arg == "--watch") dogfight_setup.own_is_ai = true; // AI flies your jet too (demo)
@@ -370,6 +389,12 @@ int main(int argc, char* argv[]) {
     sim::Aircraft* own = &free_world->aircraft[0];
     own->landing_gear.deployed = gear_down;
 
+    // The pilot's fire-control radar (FCR page on the left MFD) follows
+    // whichever world the ownship is in.
+    sim::RadarScope radar_scope;
+    bool left_mfd_fcr = true;
+    auto active_world = [&]() -> sim::World& { return dogfight_active ? dogfight->world : *free_world; };
+
     // Dogfight HUD cue timers and the event read cursor.
     double hit_cue_timer = 0.0;
     int dogfight_events_read = 0;
@@ -386,9 +411,18 @@ int main(int argc, char* argv[]) {
         hit_cue_timer = 0.0;
         dogfight_events_read = 0;
         renderer.camera_rig().reset();
-        std::cout << "[DOGFIGHT] " << sim::to_string(dogfight_setup.geometry) << " vs "
-                  << sim::to_string(dogfight_setup.skill) << " " << aircraft::to_string(dogfight_setup.bandit_type)
-                  << ". Fight's on!\n";
+        if (dogfight->evade_mode()) {
+            const auto profile = sim::EvadeProfile::of(dogfight_setup.evade_difficulty);
+            std::cout << "[EVADE] " << sim::to_string(dogfight_setup.evade_difficulty) << ": "
+                      << aircraft::to_string(dogfight_setup.bandit_type) << " (" << profile.summary << ") "
+                      << static_cast<int>(profile.start_range_m / 1852.0 + 0.5)
+                      << " nm in your six. Survive " << static_cast<int>(profile.survive_s)
+                      << " s. C dispenses chaff.\n";
+        } else {
+            std::cout << "[DOGFIGHT] " << sim::to_string(dogfight_setup.geometry) << " vs "
+                      << sim::to_string(dogfight_setup.skill) << " " << aircraft::to_string(dogfight_setup.bandit_type)
+                      << ". Fight's on!\n";
+        }
     };
     auto leave_dogfight = [&]() {
         if (!dogfight_active) return;
@@ -701,6 +735,20 @@ int main(int argc, char* argv[]) {
                     speedbrake_out = !speedbrake_out;
                     std::cout << "[SPEEDBRAKE] " << (speedbrake_out ? "EXTEND" : "RETRACT") << "\n";
                 }
+                // Radar: TMS forward / aft on one key, range bumps, left MFD page.
+                if (bound(ui::InputAction::RADAR_LOCK, ev.key.scancode) && !ev.key.repeat) {
+                    sim::World& w = active_world();
+                    radar_scope.sync(w, 0);
+                    if (radar_scope.mode == sim::RadarScope::Mode::STT) {
+                        radar_scope.undesignate(w);
+                        std::cout << "[RADAR] Lock dropped - RWS\n";
+                    } else if (!radar_scope.designate(w)) {
+                        std::cout << "[RADAR] Nothing on the scope to lock\n";
+                    }
+                }
+                if (bound(ui::InputAction::RADAR_RANGE_UP, ev.key.scancode)) radar_scope.range_up();
+                if (bound(ui::InputAction::RADAR_RANGE_DOWN, ev.key.scancode)) radar_scope.range_down();
+                if (bound(ui::InputAction::MFD_PAGE, ev.key.scancode) && !ev.key.repeat) left_mfd_fcr = !left_mfd_fcr;
                 if (bound(ui::InputAction::LANDING_GEAR, ev.key.scancode) && !ev.key.repeat) {
                     gear_down = !gear_down;
                     own->landing_gear.deployed = gear_down;
@@ -718,15 +766,29 @@ int main(int argc, char* argv[]) {
                     const int next_idx = (static_cast<int>(selected_aircraft) + 1) % 5;
                     switch_aircraft(static_cast<aircraft::AircraftType>(next_idx));
                 }
-                // Dogfight: new fight, cycle the set-up, cycle the bandit's skill.
+                // Combat: new fight, cycle the set-up (the four dogfight set-ups,
+                // then evade), cycle the bandit's skill or the evade difficulty.
                 if (ev.key.key == SDLK_F9 && !ev.key.repeat) start_dogfight_now();
                 if (ev.key.key == SDLK_F10 && !ev.key.repeat) {
-                    dogfight_setup.geometry = static_cast<sim::StartGeometry>(
-                        (static_cast<int>(dogfight_setup.geometry) + 1) % 4);
+                    if (dogfight_setup.mode == sim::EngagementMode::EVADE) {
+                        dogfight_setup.mode = sim::EngagementMode::DOGFIGHT;
+                        dogfight_setup.geometry = sim::StartGeometry::HEAD_ON_MERGE;
+                    } else if (dogfight_setup.geometry == sim::StartGeometry::GUNNERY_RANGE) {
+                        dogfight_setup.mode = sim::EngagementMode::EVADE;
+                    } else {
+                        dogfight_setup.geometry = static_cast<sim::StartGeometry>(
+                            (static_cast<int>(dogfight_setup.geometry) + 1) % 4);
+                    }
                     start_dogfight_now();
                 }
                 if (ev.key.key == SDLK_F11 && !ev.key.repeat) {
-                    dogfight_setup.skill = static_cast<sim::AiSkill>((static_cast<int>(dogfight_setup.skill) + 1) % 3);
+                    if (dogfight_setup.mode == sim::EngagementMode::EVADE) {
+                        dogfight_setup.evade_difficulty = static_cast<sim::EvadeDifficulty>(
+                            (static_cast<int>(dogfight_setup.evade_difficulty) + 1) % 4);
+                    } else {
+                        dogfight_setup.skill =
+                            static_cast<sim::AiSkill>((static_cast<int>(dogfight_setup.skill) + 1) % 3);
+                    }
                     start_dogfight_now();
                 }
                 // Quick throttle positions, so the pilot can slam to a detent
@@ -777,6 +839,13 @@ int main(int argc, char* argv[]) {
                 case ui::MenuAction::START_DOGFIGHT:
                     main_menu.close();
                     flight_started = true;
+                    dogfight_setup.mode = sim::EngagementMode::DOGFIGHT;
+                    start_dogfight_now();
+                    break;
+                case ui::MenuAction::START_EVADE:
+                    main_menu.close();
+                    flight_started = true;
+                    dogfight_setup.mode = sim::EngagementMode::EVADE;
                     start_dogfight_now();
                     break;
                 case ui::MenuAction::OPEN_MISSION_SELECT:
@@ -799,6 +868,8 @@ int main(int argc, char* argv[]) {
             throttle_dir = 0.0; // A lever held while opening a menu must not keep moving
         }
         bool trigger_held = false;
+        bool dispense_held = false;
+        double antenna_dir = 0.0;
         if (keys && !own->crashed && !any_menu_open) {
             target_pitch = 0.0;
             target_roll  = 0.0;
@@ -821,6 +892,8 @@ int main(int argc, char* argv[]) {
             // Wheel brakes for the rollout.
             wheel_braking = held(ui::InputAction::WHEEL_BRAKES);
             trigger_held = held(ui::InputAction::FIRE_GUN);
+            dispense_held = held(ui::InputAction::DISPENSE_CHAFF);
+            antenna_dir = (held(ui::InputAction::ANTENNA_UP) ? 1.0 : 0.0) - (held(ui::InputAction::ANTENNA_DOWN) ? 1.0 : 0.0);
         }
 
         // Compute delta time
@@ -840,6 +913,7 @@ int main(int argc, char* argv[]) {
         // Move the throttle lever at a fixed rate per second. Doing this here
         // (rather than in the key poll above) keeps the response identical at
         // 60 FPS and at 8,000 FPS.
+        if (antenna_dir != 0.0) radar_scope.slew_elevation(antenna_dir, frame_dt);
         if (throttle_dir != 0.0) {
             throttle = std::clamp(
                 throttle + throttle_dir * THROTTLE_SLEW_PER_SEC * frame_dt, 0.0, 1.0);
@@ -901,6 +975,7 @@ int main(int argc, char* argv[]) {
                 controls.brake_left  = (std::max)(input_mgr.brakes.effective_left(), kbd_brake);
                 controls.brake_right = (std::max)(input_mgr.brakes.effective_right(), kbd_brake);
                 controls.trigger = trigger_held;
+                controls.dispense = dispense_held;
             }
 
             // One fixed step for every jet, round and rule in the sky.
@@ -911,6 +986,7 @@ int main(int argc, char* argv[]) {
                 all[0] = controls;
                 free_world->step(SIM_DT, all);
             }
+            radar_scope.step(SIM_DT, active_world(), 0);
 
             accumulator -= SIM_DT;
         }
@@ -1002,6 +1078,13 @@ int main(int argc, char* argv[]) {
                 const sim::Projectile& p = w.rounds[static_cast<size_t>(r)];
                 if (p.active) renderer.add_tracer(p.pos, p.pos - p.vel * 0.02);
             }
+            // A missile is seen by its motor: a bright streak while it burns,
+            // then next to nothing once it coasts.
+            for (const sim::Missile& m : w.missiles) {
+                if (m.active && m.body.motor_burning(m.spec)) {
+                    renderer.add_tracer(m.body.pos, m.body.pos - m.body.vel * 0.03);
+                }
+            }
 
             // Hits scored since the last frame light the HIT cue.
             for (; dogfight_events_read < w.event_count(); ++dogfight_events_read) {
@@ -1009,6 +1092,22 @@ int main(int argc, char* argv[]) {
                 if (e.kind == sim::CombatEvent::Kind::HIT && e.shooter == sim::Engagement::OWN) hit_cue_timer = 0.6;
                 if (e.kind == sim::CombatEvent::Kind::HIT && e.victim == sim::Engagement::OWN) {
                     std::cout << "[DOGFIGHT] Hit taken: " << sim::to_string(e.zone) << "\n";
+                }
+                if (e.victim != sim::Engagement::OWN) continue;
+                switch (e.kind) {
+                    case sim::CombatEvent::Kind::MISSILE_LAUNCH:
+                        std::cout << "[EVADE] Missile launch! Bandit fired an AIM-120.\n";
+                        break;
+                    case sim::CombatEvent::Kind::MISSILE_DEFEATED:
+                        std::cout << "[EVADE] Missile defeated.\n";
+                        break;
+                    case sim::CombatEvent::Kind::MISSILE_DETONATION:
+                        std::cout << "[EVADE] Missile detonated " << static_cast<int>(e.miss_m) << " m away.\n";
+                        break;
+                    case sim::CombatEvent::Kind::LOCK_BROKEN_CHAFF:
+                        std::cout << "[EVADE] Chaff broke a lock.\n";
+                        break;
+                    default: break;
                 }
             }
             hit_cue_timer = (std::max)(0.0, hit_cue_timer - frame_dt);
@@ -1050,17 +1149,106 @@ int main(int argc, char* argv[]) {
             c.fuel_leak = dmg.fuel_leak_kgs > 0.0;
             c.control_damage = dmg.wing_left < 1.0 || dmg.wing_right < 1.0 || dmg.tail < 1.0;
             const auto bandit_name = aircraft::to_short_string(dogfight_setup.bandit_type);
-            std::snprintf(c.status, sizeof(c.status), "%s %.*s  %s", sim::to_string(dogfight_setup.skill),
-                          static_cast<int>(bandit_name.size()), bandit_name.data(),
-                          sim::to_string(dogfight_setup.geometry));
+            const bool evade = dogfight->evade_mode();
+            if (evade) {
+                // The RWR, the chaff count and the time left until the bandit is bingo.
+                const sim::RwrStatus rwr = dogfight->own_rwr();
+                c.rwr_active = true;
+                c.rwr_level = static_cast<int>(rwr.level);
+                c.rwr_emitter_valid = rwr.emitter_valid;
+                c.rwr_emitter_bearing_deg = rwr.emitter_bearing * 180.0 / M_PI;
+                std::snprintf(c.rwr_symbol, sizeof(c.rwr_symbol), "%s", rwr.emitter_symbol);
+                c.rwr_missile_valid = rwr.missile_valid;
+                c.rwr_missile_bearing_deg = rwr.missile_bearing * 180.0 / M_PI;
+                c.rwr_missile_range_m = rwr.missile_range_m;
+                c.chaff = w.chaff_load[sim::Engagement::OWN];
+                c.blink = (SDL_GetTicks() / 160) % 2 == 0;
+                const int left = static_cast<int>(
+                    std::max(0.0, dogfight->setup_data.time_limit_s - dogfight->stats.duration_s));
+                std::snprintf(c.status, sizeof(c.status), "EVADE %s  %.*s  BINGO %d:%02d",
+                              sim::to_string(dogfight_setup.evade_difficulty), static_cast<int>(bandit_name.size()),
+                              bandit_name.data(), left / 60, left % 60);
+            } else {
+                std::snprintf(c.status, sizeof(c.status), "%s %.*s  %s", sim::to_string(dogfight_setup.skill),
+                              static_cast<int>(bandit_name.size()), bandit_name.data(),
+                              sim::to_string(dogfight_setup.geometry));
+            }
             if (dogfight->finished()) {
                 std::snprintf(c.banner, sizeof(c.banner), "%s", sim::to_string(dogfight->outcome));
                 const auto& st = dogfight->stats;
                 std::snprintf(c.debrief, sizeof(c.debrief), "HITS %d  ROUNDS %d  TAKEN %d  TIME %d SEC  PEAK %.1fG",
                               st.hits_scored, st.rounds_fired, st.hits_taken, static_cast<int>(st.duration_s),
                               st.peak_g);
+                if (evade) {
+                    std::snprintf(c.debrief2, sizeof(c.debrief2),
+                                  "MISSILES %d  DEFEATED %d  CHAFF %d  LOCKS BROKEN %d  LOCKED %d SEC",
+                                  st.missiles_at_you, st.missiles_defeated, st.chaff_used, st.locks_broken_by_chaff,
+                                  static_cast<int>(st.time_locked_s));
+                }
             }
         }
+
+        // Fire-control radar page.
+        {
+            constexpr double R2D = 180.0 / M_PI;
+            constexpr double KT = 1.0 / 0.514444;
+            const sim::World& w = active_world();
+            radar_scope.sync(w, 0);
+            auto& rt = tel.radar;
+            rt.page_fcr = left_mfd_fcr && radar_scope.fitted(); // The A-10 has no FCR page
+            rt.fitted = radar_scope.fitted();
+            rt.mode = static_cast<int>(radar_scope.mode);
+            rt.range_scale_nm = radar_scope.range_scale_m() / 1852.0;
+            rt.az_limit_deg = sim::RadarScope::AZ_LIMIT_RAD * R2D;
+            rt.bars = sim::RadarScope::BARS;
+            rt.ant_az_deg = radar_scope.ant_az * R2D;
+            rt.ant_el_deg = radar_scope.ant_el * R2D;
+            rt.pitch_deg = own->state.pitch() * R2D;
+            rt.roll_deg = own->state.roll() * R2D;
+            rt.blink = (SDL_GetTicks() / 160) % 2 == 0;
+            rt.hit_count = 0;
+            for (int i = 0; i < radar_scope.hit_count && rt.hit_count < graphics::RadarTelemetry::kMaxHits; ++i) {
+                const sim::RadarHit& h = radar_scope.hits[static_cast<size_t>(i)];
+                auto& o = rt.hits[rt.hit_count++];
+                o.az_deg = static_cast<float>(h.az_rad * R2D);
+                o.range_nm = static_cast<float>(h.range_m / 1852.0);
+                o.age = radar_scope.frame - h.frame;
+            }
+            // The cursor rests on the brick it would lock, else mid-scope.
+            const sim::RadarHit* ch = radar_scope.cursor_hit();
+            rt.cursor_az_deg = ch ? ch->az_rad * R2D : 0.0;
+            rt.cursor_range_nm = ch ? ch->range_m / 1852.0 : 0.5 * rt.range_scale_nm;
+            const double cur_m = rt.cursor_range_nm * 1852.0;
+            const double own_alt_ft = own->state.altitude() / 0.3048;
+            rt.cov_top_kft = static_cast<int>(std::lround(
+                (own_alt_ft + cur_m * std::sin(radar_scope.coverage_top_rad()) / 0.3048) / 1000.0));
+            rt.cov_bottom_kft = static_cast<int>(std::lround(
+                (own_alt_ft + cur_m * std::sin(radar_scope.coverage_bottom_rad()) / 0.3048) / 1000.0));
+            if (radar_scope.mode == sim::RadarScope::Mode::STT) {
+                const sim::FireControlRadar& fcr = w.radars[0];
+                const math::Vector3 tp = fcr.track_pos, tv = fcr.track_vel;
+                double az = 0.0, el = 0.0;
+                sim::RadarScope::stabilised_angles(own->state, tp, az, el);
+                const math::Vector3 los = tp - own->position();
+                const double range = std::max(1.0, los.norm());
+                const double tgt_track = std::atan2(tv.y, tv.x);
+                // Aspect: where the ownship sits off the target's tail (180: nose-on).
+                const double beta = sim::RadarScope::wrap_pi(std::atan2(-los.y, -los.x) - tgt_track);
+                rt.track_memory = fcr.coasting;
+                rt.tgt_az_deg = az * R2D;
+                rt.tgt_range_nm = range / 1852.0;
+                rt.tgt_alt_kft = -tp.z / 0.3048 / 1000.0;
+                rt.tgt_rel_heading_deg = sim::RadarScope::wrap_pi(tgt_track - sim::RadarScope::scan_heading(own->state)) * R2D;
+                rt.tgt_heading_deg = std::fmod(tgt_track * R2D + 360.0, 360.0);
+                rt.tgt_gs_kt = std::hypot(tv.x, tv.y) * KT;
+                rt.closure_kt = -(tv - own->velocity()).dot(los / range) * KT;
+                rt.aspect_tens = static_cast<int>(std::lround((180.0 - std::abs(beta) * R2D) / 10.0));
+                rt.aspect_side = beta >= 0.0 ? 'R' : 'L';
+            }
+        }
+
+        // No threat tones over a paused sim.
+        if (main_menu.is_visible() || renderer.menu().is_open()) tel.combat.rwr_level = 0;
 
         // Update procedural audio engine with real-time acoustics
         const auto air_now = environment::Atmosphere1976::compute(own->state.altitude(), own->state.airspeed());
@@ -1075,7 +1263,7 @@ int main(int argc, char* argv[]) {
         // Main / pause menu composited over the (paused) scene
         if (main_menu.is_visible()) {
             main_menu.set_status_text(upper(std::string(aircraft::to_string(selected_aircraft))) +
-                                      (dogfight_active ? "  /  DOGFIGHT PAUSED"
+                                      (dogfight_active ? (dogfight->evade_mode() ? "  /  EVADE PAUSED" : "  /  DOGFIGHT PAUSED")
                                        : flight_started ? "  /  FLIGHT PAUSED" : "  /  RUNWAY 09 LINE-UP"));
         }
         main_menu.update(static_cast<float>(frame_dt), static_cast<float>(pixel_w), static_cast<float>(pixel_h));

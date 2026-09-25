@@ -1,6 +1,8 @@
 #pragma once
 
 #include "fastjet/sim/bfm_pilot.hpp"
+#include "fastjet/sim/evasion_pilot.hpp"
+#include "fastjet/sim/missile_shooter.hpp"
 #include "fastjet/sim/world.hpp"
 #include <array>
 #include <cmath>
@@ -29,7 +31,66 @@ enum class RangeProfile : uint8_t { STRAIGHT_AND_LEVEL, CONSTANT_TURN, WEAVE };
     return "?";
 }
 
+/// @brief Which game is being played.
+enum class EngagementMode : uint8_t {
+    DOGFIGHT, ///< 1v1 guns BFM from a chosen set-up
+    EVADE,    ///< Defensive: a bandit with radar missiles and a gun hunts you from your six
+};
+
+/// @brief Threat level for evade mode.
+enum class EvadeDifficulty : uint8_t { EASY, MEDIUM, HARD, EXPERT };
+
+[[nodiscard]] constexpr const char* to_string(EvadeDifficulty d) noexcept {
+    switch (d) {
+        case EvadeDifficulty::EASY:   return "EASY";
+        case EvadeDifficulty::MEDIUM: return "MEDIUM";
+        case EvadeDifficulty::HARD:   return "HARD";
+        case EvadeDifficulty::EXPERT: return "EXPERT";
+    }
+    return "?";
+}
+
+/**
+ * @brief What a difficulty level changes. The physics never changes: every
+ * level flies the same jets, radar and missiles. What changes is the pilot
+ * (perception, G tolerance, gunnery), his launch discipline and missile load,
+ * and how much of an advantage he starts with.
+ */
+struct EvadeProfile {
+    AiSkill pilot;
+    int missiles;
+    LaunchDoctrine doctrine;
+    bool shoot_shoot;            ///< Ripples two missiles per shot
+    double radar_acquire_s;      ///< Operator's time to lock you up in ACM
+    double start_range_m;        ///< Directly astern at the start
+    double off_tail_deg;         ///< Up to this far off your tail
+    double altitude_advantage_m;
+    double speed_advantage_mps;
+    double survive_s;            ///< Bandit bingo fuel: hold out this long
+    const char* summary;
+
+    [[nodiscard]] static constexpr EvadeProfile of(EvadeDifficulty d) noexcept {
+        switch (d) {
+            case EvadeDifficulty::EASY:
+                return {AiSkill::NOVICE, 0, LaunchDoctrine::NONE, false, 2.5, 5556.0, 25.0, 0.0, 0.0, 120.0,
+                        "NOVICE, GUNS ONLY"};
+            case EvadeDifficulty::MEDIUM:
+                return {AiSkill::VETERAN, 2, LaunchDoctrine::MAX_RANGE, false, 1.5, 18520.0, 20.0, 300.0, 20.0, 150.0,
+                        "VETERAN, 2 AIM-120, RMAX SHOTS"};
+            case EvadeDifficulty::HARD:
+                return {AiSkill::ACE, 4, LaunchDoctrine::NO_ESCAPE, false, 1.0, 12000.0, 15.0, 600.0, 40.0, 180.0,
+                        "ACE, 4 AIM-120, NO-ESCAPE SHOTS"};
+            case EvadeDifficulty::EXPERT:
+                return {AiSkill::ACE, 4, LaunchDoctrine::NO_ESCAPE, true, 0.8, 11112.0, 10.0, 900.0, 60.0, 210.0,
+                        "ACE, 4 AIM-120, SHOOT-SHOOT"};
+        }
+        return of(EvadeDifficulty::MEDIUM);
+    }
+};
+
 struct EngagementSetup {
+    EngagementMode mode{EngagementMode::DOGFIGHT};
+    EvadeDifficulty evade_difficulty{EvadeDifficulty::MEDIUM};
     aircraft::AircraftType own_type{aircraft::AircraftType::F16_FIGHTING_FALCON};
     aircraft::AircraftType bandit_type{aircraft::AircraftType::F16_FIGHTING_FALCON};
     AiSkill skill{AiSkill::VETERAN};
@@ -43,7 +104,7 @@ struct EngagementSetup {
     bool own_is_ai{false};    ///< AI flies the player's jet too (tests, attract mode)
 };
 
-enum class EngagementOutcome : uint8_t { IN_PROGRESS, WIN, LOSS, MUTUAL_KILL, TIMEOUT };
+enum class EngagementOutcome : uint8_t { IN_PROGRESS, WIN, LOSS, MUTUAL_KILL, TIMEOUT, SURVIVED, ESCAPED };
 
 [[nodiscard]] constexpr const char* to_string(EngagementOutcome o) noexcept {
     switch (o) {
@@ -52,6 +113,8 @@ enum class EngagementOutcome : uint8_t { IN_PROGRESS, WIN, LOSS, MUTUAL_KILL, TI
         case EngagementOutcome::LOSS:        return "YOU WERE SHOT DOWN";
         case EngagementOutcome::MUTUAL_KILL: return "MUTUAL KILL";
         case EngagementOutcome::TIMEOUT:     return "KNOCK IT OFF - TIME";
+        case EngagementOutcome::SURVIVED:    return "SURVIVED - BANDIT RTB";
+        case EngagementOutcome::ESCAPED:     return "ESCAPED - BANDIT LOST CONTACT";
     }
     return "?";
 }
@@ -65,6 +128,13 @@ struct EngagementStats {
     double peak_g{0.0};
     double min_agl_m{1e9};
     double duration_s{0.0};
+    // Evade mode
+    int missiles_at_you{0};
+    int missiles_defeated{0};   ///< Ran out of energy, time or track
+    int missile_detonations{0}; ///< Fuzed near you (damaging or not)
+    int chaff_used{0};
+    int locks_broken_by_chaff{0};
+    double time_locked_s{0.0};
 };
 
 /**
@@ -136,6 +206,8 @@ public:
     std::array<BfmPilot, World::kMaxAircraft> ai{};
     std::array<bool, World::kMaxAircraft> ai_controlled{};
     RangeTargetPilot range_pilot{};
+    MissileShooter shooter{};    ///< The bandit's missile shot decisions (evade mode)
+    EvasionPilot evader{};       ///< Flies the player's jet in an AI-flown evade (demo, tests)
     EngagementStats stats{};
     EngagementOutcome outcome{EngagementOutcome::IN_PROGRESS};
     double end_time{-1.0};
@@ -152,19 +224,26 @@ public:
 
         const double alt = s.altitude_m;
         const double v = s.speed_mps;
+        const bool evade = s.mode == EngagementMode::EVADE;
+        const EvadeProfile profile = EvadeProfile::of(s.evade_difficulty);
+        const AiSkill bandit_skill = evade ? profile.pilot : s.skill;
         fdm::FlightState own{}, bandit{};
-        switch (s.geometry) {
-            case StartGeometry::HEAD_ON_MERGE:
-                own = make_state({-1852.0, -150.0, -alt}, 0.0, v);
-                bandit = make_state({1852.0, 150.0, -alt}, M_PI, v);
-                break;
-            case StartGeometry::OFFENSIVE_PERCH:
-            case StartGeometry::GUNNERY_RANGE:
-                perch(own, bandit, alt, v);
-                break;
-            case StartGeometry::DEFENSIVE_PERCH:
-                perch(bandit, own, alt, v);
-                break;
+        if (evade) {
+            evade_start(own, bandit, s, profile);
+        } else {
+            switch (s.geometry) {
+                case StartGeometry::HEAD_ON_MERGE:
+                    own = make_state({-1852.0, -150.0, -alt}, 0.0, v);
+                    bandit = make_state({1852.0, 150.0, -alt}, M_PI, v);
+                    break;
+                case StartGeometry::OFFENSIVE_PERCH:
+                case StartGeometry::GUNNERY_RANGE:
+                    perch(own, bandit, alt, v);
+                    break;
+                case StartGeometry::DEFENSIVE_PERCH:
+                    perch(bandit, own, alt, v);
+                    break;
+            }
         }
 
         world.add(s.own_type, own);
@@ -176,11 +255,31 @@ public:
         }
 
         ai_controlled[OWN] = s.own_is_ai;
-        ai_controlled[BANDIT] = s.geometry != StartGeometry::GUNNERY_RANGE;
+        ai_controlled[BANDIT] = evade || s.geometry != StartGeometry::GUNNERY_RANGE;
         for (int i = 0; i < world.count; ++i) {
-            ai[static_cast<size_t>(i)] = BfmPilot(s.skill, s.seed * 2654435761u + static_cast<uint32_t>(i) * 97u + 1u);
+            ai[static_cast<size_t>(i)] =
+                BfmPilot(i == BANDIT ? bandit_skill : s.skill, s.seed * 2654435761u + static_cast<uint32_t>(i) * 97u + 1u);
             ai[static_cast<size_t>(i)].hard_deck_agl_m = s.hard_deck_agl_m;
         }
+
+        shooter = MissileShooter{};
+        shooter.reset();
+        evader = EvasionPilot{};
+        evader.reset();
+        if (evade) {
+            // Hunting a runner: he follows you low and fast, within the airframe's safe envelope.
+            ai[BANDIT].hard_deck_agl_m = std::min(s.hard_deck_agl_m, EVADE_HARD_DECK_AGL_M);
+            ai[BANDIT].max_chase_mach = EVADE_CHASE_MACH;
+            ai[BANDIT].far_chase_q_pa = EVADE_FAR_CHASE_Q_PA;
+            world.radars[BANDIT].enable(OWN, profile.radar_acquire_s);
+            const bool radar = world.radars[BANDIT].spec.fitted;
+            world.missile_load[BANDIT] = radar ? profile.missiles : 0;
+            shooter.doctrine = radar ? profile.doctrine : LaunchDoctrine::NONE;
+            shooter.shoot_shoot = profile.shoot_shoot;
+            setup_data.time_limit_s = profile.survive_s;
+        }
+        chaff_at_start_ = world.chaff_load[OWN];
+        unlocked_far_s_ = 0.0;
         range_pilot = RangeTargetPilot{};
         range_pilot.profile = s.range_profile;
         range_pilot.target_altitude_m = alt;
@@ -200,7 +299,19 @@ public:
             const auto idx = static_cast<size_t>(i);
             const Aircraft& self = world.aircraft[idx];
             const Aircraft& foe = world.aircraft[i == OWN ? BANDIT : OWN];
-            if (ai_controlled[idx]) {
+            if (ai_controlled[idx] && i == OWN && evade_mode()) {
+                // Both run every step to keep their tracks and timers current.
+                // Missiles are defeated off the RWR; a bandit close enough to
+                // see is a guns threat and gets basic fighter manoeuvres.
+                const RwrStatus rwr = world.rwr(OWN);
+                const AircraftControls bfm = ai[idx].update(dt, self, foe);
+                const AircraftControls defend = evader.update(dt, self, rwr);
+                const double range = (foe.position() - self.position()).norm();
+                const bool missile_defence = evader.mode == EvasionPilot::Mode::NOTCH_MISSILE ||
+                                             evader.mode == EvasionPilot::Mode::LAST_DITCH;
+                const bool visual_fight = range < VISUAL_FIGHT_RANGE_M && !missile_defence;
+                controls[idx] = visual_fight ? bfm : defend;
+            } else if (ai_controlled[idx]) {
                 controls[idx] = ai[idx].update(dt, self, foe);
             } else if (i == BANDIT && setup_data.geometry == StartGeometry::GUNNERY_RANGE) {
                 controls[idx] = range_pilot.update(dt, self);
@@ -209,6 +320,8 @@ public:
         // Once the fight is decided the survivors hold fire.
         if (finished()) {
             for (auto& c : controls) c.trigger = false;
+        } else if (evade_mode()) {
+            (void)shooter.update(dt, world, BANDIT, OWN);
         }
 
         world.step(dt, controls);
@@ -216,13 +329,47 @@ public:
         judge();
     }
 
+    [[nodiscard]] bool evade_mode() const noexcept { return setup_data.mode == EngagementMode::EVADE; }
+
+    /// @brief What the player's RWR shows.
+    [[nodiscard]] RwrStatus own_rwr() const noexcept { return world.rwr(OWN); }
+
     /// @brief Seconds since the fight ended (0 while in progress).
     [[nodiscard]] double time_since_end() const noexcept {
         return end_time < 0.0 ? 0.0 : world.time - end_time;
     }
 
+    /// Evade: range at which a bandit who has lost radar contact loses you for good.
+    static constexpr double ESCAPE_RANGE_M = 30000.0;
+    static constexpr double ESCAPE_HOLD_S = 10.0;
+    static constexpr double EVADE_HARD_DECK_AGL_M = 500.0;
+    static constexpr double EVADE_CHASE_MACH = 1.6;
+    static constexpr double EVADE_FAR_CHASE_Q_PA = 95000.0; ///< ~390 m/s at sea level, ~510 m/s at 5 km
+    static constexpr double VISUAL_FIGHT_RANGE_M = 4000.0;
+
 private:
     int events_read_{0};
+    int chaff_at_start_{0};
+    double unlocked_far_s_{0.0};
+
+    /**
+     * @brief Evade start: you heading north, the bandit behind you, nose on,
+     * a little off your tail (either side), above you and faster.
+     */
+    static void evade_start(fdm::FlightState& own, fdm::FlightState& bandit, const EngagementSetup& s,
+                            const EvadeProfile& p) noexcept {
+        DamageRng rng{s.seed * 0x9E3779B1u + 0x7F4A7C15u};
+        const double side = rng.uniform() < 0.5 ? -1.0 : 1.0;
+        const double off = p.off_tail_deg * (0.5 + 0.5 * rng.uniform()) * (M_PI / 180.0);
+        own = make_state({0.0, 0.0, -s.altitude_m}, 0.0, s.speed_mps);
+        const math::Vector3 pos{-p.start_range_m * std::cos(off), side * p.start_range_m * std::sin(off),
+                                -(s.altitude_m + p.altitude_advantage_m)};
+        const double heading = std::atan2(-pos.y, -pos.x);
+        bandit = make_state(pos, heading, s.speed_mps + p.speed_advantage_mps);
+        // Nose on you in pitch too, so you start inside his radar.
+        const double pitch = std::atan2(-p.altitude_advantage_m, p.start_range_m);
+        bandit.q_att = math::Quaternion::from_euler(0.0, pitch, heading);
+    }
 
     static fdm::FlightState make_state(const math::Vector3& pos, double heading, double v) noexcept {
         fdm::FlightState s{};
@@ -260,11 +407,22 @@ private:
             stats.min_agl_m = std::min(stats.min_agl_m, environment::GroundCollision::get_agl(me.state));
         }
         stats.rounds_fired = me.gun.rounds_fired;
+        stats.chaff_used = chaff_at_start_ - world.chaff_load[OWN];
+        if (!finished() && world.rwr(OWN).level >= RwrStatus::Level::LOCK) stats.time_locked_s += dt;
         for (; events_read_ < world.event_count(); ++events_read_) {
             const CombatEvent& e = world.event(events_read_);
-            if (e.kind != CombatEvent::Kind::HIT) continue;
-            if (e.shooter == OWN) ++stats.hits_scored;
-            if (e.victim == OWN) ++stats.hits_taken;
+            const bool at_me = e.victim == OWN;
+            switch (e.kind) {
+                case CombatEvent::Kind::HIT:
+                    if (e.shooter == OWN) ++stats.hits_scored;
+                    if (at_me) ++stats.hits_taken;
+                    break;
+                case CombatEvent::Kind::MISSILE_LAUNCH:     stats.missiles_at_you += at_me; break;
+                case CombatEvent::Kind::MISSILE_DEFEATED:   stats.missiles_defeated += at_me; break;
+                case CombatEvent::Kind::MISSILE_DETONATION: stats.missile_detonations += at_me; break;
+                case CombatEvent::Kind::LOCK_BROKEN_CHAFF:  stats.locks_broken_by_chaff += at_me; break;
+                default: break;
+            }
         }
     }
 
@@ -275,8 +433,24 @@ private:
         if (own_out && bandit_out) outcome = EngagementOutcome::MUTUAL_KILL;
         else if (bandit_out) outcome = EngagementOutcome::WIN;
         else if (own_out) outcome = EngagementOutcome::LOSS;
+        else if (evade_mode()) judge_evade();
         else if (world.time >= setup_data.time_limit_s) outcome = EngagementOutcome::TIMEOUT;
         if (finished()) end_time = world.time;
+    }
+
+    /// @brief Evade ends when you outlast his fuel, when he is out of weapons
+    /// (Winchester) or when he has lost you: no lock, nothing in the air and you
+    /// beyond his radar's reach for long enough that he gives up.
+    void judge_evade() noexcept {
+        constexpr double DT = Aircraft::DT;
+        const auto b = static_cast<size_t>(BANDIT);
+        const bool nothing_inbound = world.missiles_in_flight(BANDIT, OWN) == 0;
+        const bool winchester = world.missile_load[b] == 0 && world.aircraft[b].gun.ammo == 0 && nothing_inbound;
+        const double range = (world.aircraft[b].position() - world.aircraft[OWN].position()).norm();
+        const bool lost = !world.radars[b].locked() && nothing_inbound && range > ESCAPE_RANGE_M;
+        unlocked_far_s_ = lost ? unlocked_far_s_ + DT : 0.0;
+        if (world.time >= setup_data.time_limit_s || winchester) outcome = EngagementOutcome::SURVIVED;
+        else if (unlocked_far_s_ >= ESCAPE_HOLD_S) outcome = EngagementOutcome::ESCAPED;
     }
 };
 
